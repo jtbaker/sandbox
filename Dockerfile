@@ -52,7 +52,7 @@ RUN uv python install && ln -s $(uv python find 3.14 || uv python find 3.13 || u
 RUN curl https://install.duckdb.org | sh
 
 # Install the Pi coding agent globally (pin to a known-good release)
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.85.1
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.2
 
 # Install the omp (oh-my-pi) coding agent globally (pin to a known-good
 # release, like the pi pin above). omp has a native Rust core; the official
@@ -60,7 +60,7 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.85.1
 # target platform (linux/amd64 + linux/arm64 here) and verifies its sha256.
 # omp uses /root/.omp/agent; Pi uses /root/.pi/agent. Do not set the shared
 # PI_CODING_AGENT_DIR override, which would merge their configuration.
-RUN curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v18.12.6
+RUN curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v18.18.9
 
 # Prefix the existing theme prompt without changing its contents.
 RUN printf '\nPROMPT="🔒 $PROMPT"\n' >> /root/.zshrc

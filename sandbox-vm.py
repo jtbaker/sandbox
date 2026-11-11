@@ -17,12 +17,11 @@ touch no VM that did not boot the sandbox image.
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
-import time
+from pathlib import Path
 
 SMOLVM = os.environ.get("SMOLVM", "smolvm")
 # smolvm names ephemeral VMs vm-XXXXXXXX and names saved machines after the
@@ -36,8 +35,9 @@ SMOLVM_VMS = Path(os.environ.get("HOME", "")) / "Library" / "Caches" / "smolvm" 
 
 
 def run(args, check=True):
-    completed = subprocess.run([SMOLVM, "machine", *args],
-                              text=True, capture_output=True, check=False)
+    completed = subprocess.run(
+        [SMOLVM, "machine", *args], text=True, capture_output=True, check=False
+    )
     if check and completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
         raise RuntimeError(f"smolvm machine {' '.join(args)} failed: {detail}")
@@ -63,9 +63,11 @@ def sandbox_records(records):
         image = record.get("image")
         if not isinstance(name, str):
             continue
-        if SAVED_NAME.match(name):
-            selected.append(record)
-        elif EPHEMERAL_NAME.match(name) and isinstance(image, str) and LOCAL_IMAGE.match(image):
+        if SAVED_NAME.match(name) or (
+            EPHEMERAL_NAME.match(name)
+            and isinstance(image, str)
+            and LOCAL_IMAGE.match(image)
+        ):
             selected.append(record)
     return selected
 
@@ -77,8 +79,12 @@ def launcher_children():
     process's ancestor; a leaked VM's `_boot-vm` was reparented to launchd, so
     walking its parents never reaches a `machine run` process.
     """
-    completed = subprocess.run(["ps", "-ax", "-o", "pid=,ppid=,args="],
-                              text=True, capture_output=True, check=False)
+    completed = subprocess.run(
+        ["ps", "-ax", "-o", "pid=,ppid=,args="],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     if completed.returncode != 0:
         raise RuntimeError("reading the process table failed")
     parents = {}
@@ -143,9 +149,21 @@ def running_for(workspace, owned=None, booting=None):
         if record.get("state") != "running":
             continue
         completed = subprocess.run(
-            [SMOLVM, "machine", "exec", "--name", record["name"], "--",
-             "/bin/sh", "-c", f"mount | grep -F {needle}"],
-            text=True, capture_output=True, check=False)
+            [
+                SMOLVM,
+                "machine",
+                "exec",
+                "--name",
+                record["name"],
+                "--",
+                "/bin/sh",
+                "-c",
+                f"mount | grep -F {needle}",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
         if completed.returncode != 0 or workspace not in completed.stdout:
             continue
         status, _ = attach_state(record, owned, booting)
@@ -173,8 +191,10 @@ def do_list(args):
             status, reason = (state, "")
         memory = record.get("memory_mib")
         memory = f"{memory} MiB" if isinstance(memory, int) else "-"
-        print(f"{name:16s} {state:9s} {memory:9s} {status}"
-              + (f" ({reason})" if reason else ""))
+        print(
+            f"{name:16s} {state:9s} {memory:9s} {status}"
+            + (f" ({reason})" if reason else "")
+        )
     return 0
 
 
@@ -210,8 +230,10 @@ def do_reap(args):
             print(f"Deleted {name}: stopped")
             pruned.append(name)
     if stopped:
-        print(f"Reclaimed memory from {len(stopped)} abandoned VM"
-              f"{'s' if len(stopped) != 1 else ''}.")
+        print(
+            f"Reclaimed memory from {len(stopped)} abandoned VM"
+            f"{'s' if len(stopped) != 1 else ''}."
+        )
     freed = store_usage() if (stopped or pruned) else 0
     if freed:
         print(f"Machine store now uses {freed}.")
@@ -222,8 +244,9 @@ def store_usage():
     """Real disk in the smolvm store. `du` counts sparse files by blocks used."""
     if not SMOLVM_VMS.is_dir():
         return ""
-    completed = subprocess.run(["du", "-sh", str(SMOLVM_VMS)],
-                              text=True, capture_output=True, check=False)
+    completed = subprocess.run(
+        ["du", "-sh", str(SMOLVM_VMS)], text=True, capture_output=True, check=False
+    )
     if completed.returncode != 0:
         return ""
     fields = completed.stdout.split()
@@ -231,12 +254,12 @@ def store_usage():
 
 
 def stop(name):
-    run(['stop', '-n', name])
+    run(["stop", "-n", name])
 
 
 def delete(name):
-    run(['stop', '-n', name], check=False)
-    run(['delete', '--name', name, '-f'])
+    run(["stop", "-n", name], check=False)
+    run(["delete", "--name", name, "-f"])
 
 
 def do_stop(args):
@@ -246,7 +269,9 @@ def do_stop(args):
             print(f"Deleted {name} and freed its disk.")
         else:
             stop(name)
-            print(f"Stopped {name}; its disk is still allocated. Pass --delete to free it.")
+            print(
+                f"Stopped {name}; its disk is still allocated. Pass --delete to free it."
+            )
     return 0
 
 
@@ -275,11 +300,14 @@ def do_reuse(args):
         status, reason = attach_state(running, owned, booting)
         if status == "attached":
             print(f"Reusing {running['name']} for {workspace}: {reason}.")
-            print("That terminal is the session. Open a second VM from another "
-                  "directory.")
+            print(
+                "That terminal is the session. Open a second VM from another directory."
+            )
             return 0
-        print(f"{running['name']} serves {workspace} but {reason}; starting a "
-              "fresh VM with a current network policy.")
+        print(
+            f"{running['name']} serves {workspace} but {reason}; starting a "
+            "fresh VM with a current network policy."
+        )
     else:
         print(f"No running VM for {workspace}; creating one.")
     agent = args.agent or "pi"
@@ -300,22 +328,30 @@ def build_parser():
     listing.set_defaults(func=do_list)
 
     reap = subparsers.add_parser("reap", help="stop abandoned VMs, free stale disk")
-    reap.add_argument("--dry-run", action="store_true", help="report without changing state")
-    reap.add_argument("--include-named", action="store_true",
-                      help="also stop detached named machines")
-    reap.add_argument("--all", action="store_true",
-                      help="also delete stopped machines after reaping")
+    reap.add_argument(
+        "--dry-run", action="store_true", help="report without changing state"
+    )
+    reap.add_argument(
+        "--include-named", action="store_true", help="also stop detached named machines"
+    )
+    reap.add_argument(
+        "--all", action="store_true", help="also delete stopped machines after reaping"
+    )
     reap.set_defaults(func=do_reap)
 
     stop_parser = subparsers.add_parser("stop", help="stop named sandboxes")
     stop_parser.add_argument("names", nargs="+")
-    stop_parser.add_argument("--delete", action="store_true",
-                            help="also remove the record and free its disk")
+    stop_parser.add_argument(
+        "--delete", action="store_true", help="also remove the record and free its disk"
+    )
     stop_parser.set_defaults(func=do_stop)
 
     reuse = subparsers.add_parser(
-        "reuse", help="reuse, reactivate, or create the VM for a project")
-    reuse.add_argument("--target", default=".", help="project directory (default: current)")
+        "reuse", help="reuse, reactivate, or create the VM for a project"
+    )
+    reuse.add_argument(
+        "--target", default=".", help="project directory (default: current)"
+    )
     reuse.add_argument("--agent", choices=("pi", "omp"))
     reuse.add_argument("--dns", help="guest resolver (default: the launcher's choice)")
     reuse.set_defaults(func=do_reuse)
