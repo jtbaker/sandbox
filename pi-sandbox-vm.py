@@ -302,7 +302,7 @@ def build_parser():
     reap = subparsers.add_parser("reap", help="stop abandoned VMs, free stale disk")
     reap.add_argument("--dry-run", action="store_true", help="report without changing state")
     reap.add_argument("--include-named", action="store_true",
-                      help="also stop detached named machines, not just leaked ones")
+                      help="also stop detached named machines")
     reap.add_argument("--all", action="store_true",
                       help="also delete stopped machines after reaping")
     reap.set_defaults(func=do_reap)

@@ -41,7 +41,7 @@ Without `PI_SANDBOX_IMAGE`, the launcher pulls `jasonbaker/pi-sandbox:latest`. A
 ./pi-sandbox.sh --help
 ```
 
-The launcher passes `--dns 100.100.100.100` — Tailscale's resolver address — to smolvm unless you pass `--dns` yourself. See [Tailnet DNS](#tailnet-dns) for why that address is the right default.
+The launcher passes `--dns 100.100.100.100` to smolvm, the Tailscale resolver address, unless you pass `--dns` yourself. See [Tailnet DNS](#tailnet-dns) for why that address is the right default.
 
 `--agent` and `AGENT` select the startup hint, not an automatically launched process. Both agents remain available in the same shell. `--agent` overrides `AGENT`; accepted values are `pi` and `omp`.
 
@@ -69,13 +69,12 @@ Start a sandbox for a directory and it picks up whatever exists there:
 ./pi-sandbox-vm.py reuse --target ~/src/api
 ```
 
-One of three things happens:
+There are two outcomes.
 
 - A VM for that directory is running with a live launcher: the command prints
-  its name and stops. That terminal is the session; nothing new starts.
-- A VM for that directory is running but no longer has a launcher, or nothing
-  is running: `pi-sandbox.sh` starts for that directory.
-- Nothing was started there before: same as the previous case, the first run.
+  its name and exits. That terminal is the session; nothing new starts.
+- A VM for that directory is running with a dead launcher, or none is running:
+  `pi-sandbox.sh` starts for that directory, including the first run ever.
 
 Sessions and history survive every case. They live in host directories mounted
 into each VM, so a new VM sees the work of the previous one.
@@ -83,7 +82,8 @@ into each VM, so a new VM sees the work of the previous one.
 A running VM is reused, never restarted in place. smolvm skips init commands
 when it restarts a stopped machine, and init is what installs the pinned
 tailnet policy, so a restarted machine would run an agent under a stale policy.
-`reuse` starts a fresh VM instead, which pays the usual 4-5 second boot.
+`reuse` starts a fresh VM instead, a 4 to 5 second boot when the image archive
+is already cached.
 
 A run that exits on its own already reaps its own VM. A run that is killed, or
 whose terminal closes, leaks the VM: it stays in `smolvm machine ls` as
@@ -101,8 +101,10 @@ has been reparented to launchd, so `reap` stops it. Only VMs running the
 pi-sandbox image are considered; other smolvm machines are untouched. `list`
 reports the same result as `attached` or `detached`.
 
-`reap --all` also deletes stopped machines and frees their disk, and
-`stop NAME --delete` does that for one machine.
+`reap --include-named` includes detached named machines (created with
+`machine run --name`), which are left alone by default. `reap --all` does the
+same and also deletes stopped machines, freeing their disk.
+`stop NAME --delete` deletes one machine.
 
 ## Sharing Agent Configuration
 
