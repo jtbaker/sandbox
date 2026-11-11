@@ -908,7 +908,7 @@ for agent in pi omp; do
     command -v "$agent" >/dev/null || fail "$agent command is missing"
     version="$(timeout 30 "$agent" --version 2>/dev/null)" || fail "$agent --version failed"
     case "$agent:$version" in
-        pi:*0.85.1*|omp:*18.12.6*) ;;
+        pi:*1.5.2*|omp:*18.18.9*) ;;
         *) fail "$agent does not match the pinned verifier API version" ;;
     esac
 done
