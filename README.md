@@ -17,7 +17,7 @@ Build and run the current working tree locally, without publishing:
 
 ```bash
 docker buildx build --load -f Dockerfile.pi -t pi-sandbox:local .
-PI_SANDBOX_IMAGE=pi-sandbox:local ./pi-sandbox.sh --dns 100.100.100.100 /path/to/project
+PI_SANDBOX_IMAGE=pi-sandbox:local ./pi-sandbox.sh /path/to/project
 ```
 
 The VM opens an interactive login shell. Its zsh prompt starts with `🔒 ` to identify the sandbox; the rest of the prompt is unchanged. Run `pi` or `omp` from that shell.
@@ -25,7 +25,7 @@ The VM opens an interactive login shell. Its zsh prompt starts with `🔒 ` to i
 To use the published image instead:
 
 ```bash
-./pi-sandbox.sh --dns 100.100.100.100 /path/to/project
+./pi-sandbox.sh /path/to/project
 ```
 
 Without `PI_SANDBOX_IMAGE`, the launcher pulls `jasonbaker/pi-sandbox:latest`. A local image override skips that pull. Images must advertise the current configuration and network-policy layout. If the published image is older, the launcher builds a matching `pi-sandbox:config-local` image from the sources beside the launcher, without publishing it. An incompatible explicit override fails with a rebuild instruction. Rebuild after changing the Dockerfile, Python entrypoints, or either sandbox JSON profile.
@@ -33,12 +33,15 @@ Without `PI_SANDBOX_IMAGE`, the launcher pulls `jasonbaker/pi-sandbox:latest`. A
 ## Usage
 
 ```bash
-./pi-sandbox.sh --dns 100.100.100.100
+./pi-sandbox.sh
+./pi-sandbox.sh /path/to/project
+./pi-sandbox.sh --agent omp /path/to/project
+./pi-sandbox.sh --ssh-agent /path/to/project
 ./pi-sandbox.sh --dns 100.100.100.100 /path/to/project
-./pi-sandbox.sh --agent omp --dns 100.100.100.100 /path/to/project
-./pi-sandbox.sh --ssh-agent --dns 100.100.100.100 /path/to/project
 ./pi-sandbox.sh --help
 ```
+
+The launcher passes `--dns 100.100.100.100` — Tailscale's resolver address — to smolvm unless you pass `--dns` yourself. See [Tailnet DNS](#tailnet-dns) for why that address is the right default.
 
 `--agent` and `AGENT` select the startup hint, not an automatically launched process. Both agents remain available in the same shell. `--agent` overrides `AGENT`; accepted values are `pi` and `omp`.
 
@@ -54,6 +57,52 @@ Symlink the launcher into a directory on your `PATH`:
 ln -s /path/to/pi-sandbox.sh /usr/local/bin/pi-sandbox
 pi-sandbox /path/to/project
 ```
+
+## Reusing and Reclaiming VMs
+
+`pi-sandbox-vm.py` reuses a VM that is already serving a project, and reclaims
+VMs that an interrupted run left behind.
+
+Start a sandbox for a directory and it picks up whatever exists there:
+
+```bash
+./pi-sandbox-vm.py reuse --target ~/src/api
+```
+
+One of three things happens:
+
+- A VM for that directory is running with a live launcher: the command prints
+  its name and stops. That terminal is the session; nothing new starts.
+- A VM for that directory is running but no longer has a launcher, or nothing
+  is running: `pi-sandbox.sh` starts for that directory.
+- Nothing was started there before: same as the previous case, the first run.
+
+Sessions and history survive every case. They live in host directories mounted
+into each VM, so a new VM sees the work of the previous one.
+
+A running VM is reused, never restarted in place. smolvm skips init commands
+when it restarts a stopped machine, and init is what installs the pinned
+tailnet policy, so a restarted machine would run an agent under a stale policy.
+`reuse` starts a fresh VM instead, which pays the usual 4-5 second boot.
+
+A run that exits on its own already reaps its own VM. A run that is killed, or
+whose terminal closes, leaks the VM: it stays in `smolvm machine ls` as
+`running (eph)`, holding its memory. Reclaim those VMs with:
+
+```bash
+./pi-sandbox-vm.py list            # show VMs and who owns them
+./pi-sandbox-vm.py reap --dry-run  # report what would stop
+./pi-sandbox-vm.py reap            # stop abandoned VMs, free memory
+```
+
+`reap` judges each VM by process ownership. A live launcher is an ancestor of
+its VM's boot process, so an attached VM is kept. A leaked VM's boot process
+has been reparented to launchd, so `reap` stops it. Only VMs running the
+pi-sandbox image are considered; other smolvm machines are untouched. `list`
+reports the same result as `attached` or `detached`.
+
+`reap --all` also deletes stopped machines and frees their disk, and
+`stop NAME --delete` does that for one machine.
 
 ## Sharing Agent Configuration
 
@@ -121,7 +170,7 @@ The agents can also use credentials from their copied configuration.
 
 ```bash
 export LLM_BASE_URL="https://spark1.taild8834b.ts.net"
-./pi-sandbox.sh --dns 100.100.100.100 /path/to/project
+./pi-sandbox.sh /path/to/project
 ```
 
 The endpoint is passed unchanged as `OPENAI_BASE_URL` and `LLM_BASE_URL` through `--secret-env`, without printing it. When it is set, the two forwarded cloud API key variables are omitted; credentials already in shared configuration are not removed.
@@ -130,13 +179,13 @@ There is no automatic host-loopback or LAN rewriting. `localhost` means the VM i
 
 ### Tailnet DNS
 
-If the host resolves Tailscale MagicDNS names but the VM reports `ENOTFOUND`, select the Tailscale resolver explicitly:
+`sandbox-network.json` names a MagicDNS host, so the guest needs a resolver that knows tailnet names. smolvm's resolver forwards to public nameservers by default, and those do not, which is why the launcher sets `--dns 100.100.100.100` when you don't. That address is Tailscale's resolver, defined in [tailscale/hostenv](https://pkg.go.dev/tailscale.com/tsd/tailnetsock) as `100.100.100.100`; it answers tailnet names and forwards everything else to public nameservers, so it behaves like the public default wherever Tailscale is absent. Passing `--dns` replaces it:
 
 ```bash
-./pi-sandbox.sh --dns 100.100.100.100 /path/to/project
+./pi-sandbox.sh --dns 1.1.1.1 /path/to/project
 ```
 
-This requires the host's Tailscale connection and DNS service to be available. It fixes resolver selection; it does not enroll the VM as a separate Tailscale node or give it an independent access policy. Tailnet connections through the host can still use the host's permissions.
+Note this requires the host's Tailscale connection and DNS service to be available. It fixes resolver selection; it does not enroll the VM as a separate Tailscale node or give it an independent access policy. Tailnet connections through the host can still use the host's permissions. If startup reports `resolving tailnet host ... failed`, the host is not resolving MagicDNS names: check `tailscale status` and `dscacheutil -q host -a name spark1.taild8834b.ts.net` there.
 
 ## Network Policy
 
@@ -203,6 +252,7 @@ PI_SANDBOX_VERIFY_IMAGE_TAR=/path/to/image.tar ./verify-guest.sh
 
 - `Dockerfile.pi`: guest image and entrypoint.
 - `pi-sandbox.sh`: host launcher and mount validation.
+- `pi-sandbox-vm.py`: reuse a project's VM, reclaim abandoned VMs.
 - `pi-agent-seed.py`: private, per-agent configuration snapshots.
 - `pi-network-policy.py`: pinned tailnet HTTPS exception and kernel egress policy.
 - `sandbox-network.json`: permitted tailnet hostname and TCP port.

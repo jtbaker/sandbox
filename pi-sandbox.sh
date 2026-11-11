@@ -20,7 +20,8 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --agent NAME        Startup hint: pi (default) or omp; does not launch it."
             echo "  --ssh-agent         Opt in to forwarding the socket in SSH_AUTH_SOCK."
-            echo "  --dns IP            Guest DNS resolver (e.g. 100.100.100.100 for MagicDNS)."
+            echo "  --dns IP            Guest DNS resolver (default 100.100.100.100, the"
+            echo "                      Tailscale resolver; pass a public resolver to override)."
             echo "  -h, --help          Show this help message"
             echo ""
             echo "Environment Variables:"
@@ -259,6 +260,14 @@ SMOLVM_ARGS=(machine run -it --net --net-backend virtio-net --smolfile "$SMOLFIL
     --env PI_SANDBOX_PERSIST_SESSIONS=1)
 if [[ -n "$WORKSPACE_ALIAS" ]]; then
     SMOLVM_ARGS+=(--env "PI_SANDBOX_WORKSPACE_ALIAS=$WORKSPACE_ALIAS")
+fi
+if [[ -z "$DNS_SERVER" ]]; then
+    # The smolvm resolver forwards to public nameservers by default, and those
+    # cannot answer MagicDNS names, so trusted init fails resolving
+    # tailnetHost. 100.100.100.100 is Tailscale's resolver address: queries
+    # outside the tailnet go to public nameservers anyway, so this stays the
+    # default whether or not the host runs Tailscale.
+    DNS_SERVER="100.100.100.100"
 fi
 if [[ -n "$DNS_SERVER" ]]; then
     SMOLVM_ARGS+=(--dns "$DNS_SERVER")
