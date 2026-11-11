@@ -6,12 +6,15 @@ is killed, or whose terminal closes, leaks the VM: `machine ls` still lists it
 as `running (eph)` and its `_boot-vm` process stays alive with no host process
 attached.
 
-`reuse` picks the VM already mounted on a project directory when a live
-launcher still owns it, and otherwise starts `sandbox.sh` for that
-directory. A VM is never restarted in place, because smolvm skips init on
-restart and init is what installs the pinned tailnet policy. `reap` stops
-leaked VMs. Both decide ownership from the process tree, never from files, and
-touch no VM that did not boot the sandbox image.
+`reuse` and `attach` reach the VM already mounted on a project directory.
+With a live launcher owning it, both exec a fresh login shell into that VM:
+the running console session keeps its serial port alone, and a new shell sees
+the same mounted project and the installed egress policy. Without one, `reuse`
+starts `sandbox.sh` for that directory. A VM is never restarted in place,
+because smolvm skips init on restart and init is what installs the pinned
+tailnet policy. `reap` stops leaked VMs. All of them decide ownership from the
+process tree, never from files, and touch no VM that did not boot the sandbox
+image.
 """
 
 import argparse
@@ -275,6 +278,26 @@ def do_stop(args):
     return 0
 
 
+def exec_shell(record, command=None):
+    """Replace this process with a login shell in the VM's workload namespace.
+
+    `machine exec` runs inside the guest init namespace, the same namespace as
+    the console session: the project mount, the egress policy and the seeded
+    configuration are all in force. The serial console is not shared, so the
+    session on the first terminal keeps running untouched. Use the shell so
+    PATH is searched for smolvm: the helper's SMOLVM default is a bare name,
+    and `os.execv` searches nothing.
+    """
+    argv = ["machine", "exec", "--name", record["name"]]
+    argv += command or ["/bin/zsh", "-l"]
+    sys.stdout.flush()
+    launcher = f"exec {shlex.quote(SMOLVM)}"
+    os.execv(
+        "/bin/sh",
+        ["/bin/sh", "-c", f'{launcher} "$@"', "sandbox-vm", *argv],
+    )
+
+
 def launcher_path():
     script = Path(__file__).resolve().with_name("sandbox.sh")
     if not script.is_file():
@@ -285,11 +308,12 @@ def launcher_path():
 def do_reuse(args):
     """Reuse, reactivate, or create the VM for one project directory.
 
-    A VM with a live launcher is reused: its terminal is the session. When the
-    VM for this workspace has no launcher, or none is running, the launcher
-    starts again, because smolvm skips init when a machine restarts and a
-    stale policy would carry over. Sessions live in host mounts, so history
-    survives in every branch.
+    A VM with a live launcher is joined: this process execs a login shell
+    inside it, beside the running console session. When the VM for this
+    workspace has no launcher, or none is running, the launcher starts again,
+    because smolvm skips init when a machine restarts and a stale policy would
+    carry over. Sessions live in host mounts, so history survives in every
+    branch.
     """
     workspace = str(Path(args.target).resolve())
     if not Path(workspace).is_dir():
@@ -299,10 +323,8 @@ def do_reuse(args):
     if running is not None:
         status, reason = attach_state(running, owned, booting)
         if status == "attached":
-            print(f"Reusing {running['name']} for {workspace}: {reason}.")
-            print(
-                "That terminal is the session. Open a second VM from another directory."
-            )
+            print(f"Joining {running['name']} for {workspace}: {reason}.")
+            exec_shell(running)
             return 0
         print(
             f"{running['name']} serves {workspace} but {reason}; starting a "
@@ -318,6 +340,51 @@ def do_reuse(args):
     argv.append(workspace)
     sys.stdout.flush()
     os.execv(argv[0], argv)
+
+
+def resolve_target(args):
+    """The VM to attach: named with --vm, else the one mounted on --target.
+
+    A named machine must be a sandbox VM by name, which keeps `attach --vm`
+    from exec-ing into an unrelated machine. A targeted lookup requires the VM
+    to have a live launcher, so attach never joins a leaked VM whose policy
+    state is unverified.
+    """
+    if args.vm is not None:
+        if not SAVED_NAME.match(args.vm) and not EPHEMERAL_NAME.match(args.vm):
+            raise RuntimeError(f"not a sandbox machine name: {args.vm}")
+        for record in machines():
+            if record.get("name") == args.vm and record.get("state") == "running":
+                return record
+        raise RuntimeError(f"no running sandbox machine named {args.vm}")
+    workspace = str(Path(args.target).resolve())
+    if not Path(workspace).is_dir():
+        raise RuntimeError(f"workspace is not a directory: {workspace}")
+    owned, booting = launcher_children()
+    running = running_for(workspace, owned, booting)
+    if running is None:
+        raise RuntimeError(
+            f"no running VM mounts {workspace}; start one with sandbox.sh"
+        )
+    status, reason = attach_state(running, owned, booting)
+    if status != "attached":
+        raise RuntimeError(
+            f"{running['name']} mounts {workspace} but {reason}; "
+            "start a fresh VM with sandbox.sh instead"
+        )
+    return running
+
+
+def do_attach(args):
+    record = resolve_target(args)
+    print(f"Attaching to {record['name']}; a login shell starts beside any console.")
+    # REMAINDER keeps the user's `--` separator, and `machine exec` takes no
+    # separator of its own: the command starts after its flags.
+    command = args.command
+    if command[:1] == ["--"]:
+        command = command[1:]
+    exec_shell(record, command)
+    return 0
 
 
 def build_parser():
@@ -355,6 +422,20 @@ def build_parser():
     reuse.add_argument("--agent", choices=("pi", "omp"))
     reuse.add_argument("--dns", help="guest resolver (default: the launcher's choice)")
     reuse.set_defaults(func=do_reuse)
+
+    attach = subparsers.add_parser(
+        "attach", help="open a login shell in a running sandbox VM"
+    )
+    attach.add_argument(
+        "--target", default=".", help="project directory (default: current)"
+    )
+    attach.add_argument("--vm", help="attach by machine name instead of by target")
+    attach.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="run this command in the VM instead of a login shell",
+    )
+    attach.set_defaults(func=do_attach)
 
     return parser
 

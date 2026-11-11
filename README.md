@@ -71,10 +71,25 @@ Start a sandbox for a directory and it picks up whatever exists there:
 
 There are two outcomes.
 
-- A VM for that directory is running with a live launcher: the command prints
-  its name and exits. That terminal is the session; nothing new starts.
+- A VM for that directory is running with a live launcher: the command execs a
+  login shell inside that VM. The terminal joins the existing VM beside its
+  console session, and nothing new starts.
 - A VM for that directory is running with a dead launcher, or none is running:
   `sandbox.sh` starts for that directory, including the first run ever.
+
+To join a running VM without the create path, or to reach it by name:
+
+```bash
+./sandbox-vm.py attach --target ~/src/api      # login shell in its VM
+./sandbox-vm.py attach --vm vm-1a2b3c4d        # same, addressed by name
+./sandbox-vm.py attach -- vm -c 'hostname'     # run a command instead of a shell
+```
+
+The shell starts in the VM's workload namespace, where the project mount, the
+egress policy, and the seeded configuration are in force. The first terminal's
+console session keeps running; a second `sandbox.sh` for the same directory
+would instead start a second VM, because `machine run` connects its console to
+the VM's single serial port.
 
 Sessions and history survive every case. They live in host directories mounted
 into each VM, so a new VM sees the work of the previous one.
@@ -254,7 +269,7 @@ SANDBOX_VERIFY_IMAGE_TAR=/path/to/image.tar ./verify-guest.sh
 
 - `Dockerfile`: guest image and entrypoint.
 - `sandbox.sh`: host launcher and mount validation.
-- `sandbox-vm.py`: reuse a project's VM, reclaim abandoned VMs.
+- `sandbox-vm.py`: reuse or attach to a project's VM, reclaim abandoned VMs.
 - `vm-seed.py`: private, per-agent configuration snapshots.
 - `vm-network.py`: pinned tailnet HTTPS exception and kernel egress policy.
 - `sandbox-network.json`: permitted tailnet hostname and TCP port.
