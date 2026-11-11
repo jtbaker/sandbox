@@ -6,6 +6,8 @@ IMAGE_NAME="${PI_SANDBOX_IMAGE-jasonbaker/pi-sandbox:latest}"
 AGENT="${AGENT-pi}"
 SSH_AGENT=false
 DNS_SERVER=""
+# The image's TERM, kept in step with Dockerfile.pi.
+VM_TERM=xterm-256color
 TARGET_SET=false
 
 # Validate all user-controlled launch settings before Docker or VM activity.
@@ -28,6 +30,9 @@ while [[ $# -gt 0 ]]; do
             echo "  AGENT               Startup hint: pi or omp (--agent overrides)."
             echo "  PI_SANDBOX_IMAGE    Use an existing local image instead of pulling latest."
             echo "                      Export fallback may fetch its immutable registry digest."
+            echo "  TERM                Passed to the guest when it names a terminal the guest"
+            echo "                      can drive (xterm*, screen*, tmux*, vt100, vt102, linux);"
+            echo "                      otherwise the guest uses $VM_TERM."
             echo "  LLM_BASE_URL        Custom endpoint; disables cloud API key forwarding."
             echo "  ANTHROPIC_API_KEY   Forwarded only when LLM_BASE_URL is empty."
             echo "  OPENAI_API_KEY      Forwarded only when LLM_BASE_URL is empty."
@@ -261,6 +266,19 @@ SMOLVM_ARGS=(machine run -it --net --net-backend virtio-net --smolfile "$SMOLFIL
 if [[ -n "$WORKSPACE_ALIAS" ]]; then
     SMOLVM_ARGS+=(--env "PI_SANDBOX_WORKSPACE_ALIAS=$WORKSPACE_ALIAS")
 fi
+# smolvm forwards the host TERM, which overrides the image default. A host TERM
+# of dumb, or a type absent from the guest database, leaves zle without key
+# codes, and arrow keys stop moving through history. Pass the host type when it
+# is a terminal the guest can drive; use the image type otherwise.
+case "${TERM-}" in
+    xterm*|screen*|tmux*|vt100|vt102|linux)
+        SMOLVM_ARGS+=(--env "TERM=$TERM") ;;
+    *)
+        SMOLVM_ARGS+=(--env "TERM=$VM_TERM")
+        if [[ -t 0 && "${TERM-}" != "$VM_TERM" ]]; then
+            echo "Guest terminal set to $VM_TERM (host TERM=${TERM:-unset})." >&2
+        fi ;;
+esac
 if [[ -z "$DNS_SERVER" ]]; then
     # The smolvm resolver forwards to public nameservers by default, and those
     # cannot answer MagicDNS names, so trusted init fails resolving
