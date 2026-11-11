@@ -1,4 +1,4 @@
-# Pi Sandbox
+# Sandbox
 
 Run [Pi](https://pi.dev) or [omp](https://omp.sh) inside an ephemeral smolvm microVM, with a writable project directory, persistent native session history, and private copies of the host's agent configuration.
 
@@ -16,8 +16,8 @@ Run [Pi](https://pi.dev) or [omp](https://omp.sh) inside an ephemeral smolvm mic
 Build and run the current working tree locally, without publishing:
 
 ```bash
-docker buildx build --load -f Dockerfile.pi -t pi-sandbox:local .
-PI_SANDBOX_IMAGE=pi-sandbox:local ./pi-sandbox.sh /path/to/project
+docker buildx build --load -f Dockerfile -t sandbox:local .
+SANDBOX_IMAGE=sandbox:local ./sandbox.sh /path/to/project
 ```
 
 The VM opens an interactive login shell. Its zsh prompt starts with `🔒 ` to identify the sandbox; the rest of the prompt is unchanged. Run `pi` or `omp` from that shell.
@@ -25,20 +25,20 @@ The VM opens an interactive login shell. Its zsh prompt starts with `🔒 ` to i
 To use the published image instead:
 
 ```bash
-./pi-sandbox.sh /path/to/project
+./sandbox.sh /path/to/project
 ```
 
-Without `PI_SANDBOX_IMAGE`, the launcher pulls `jasonbaker/pi-sandbox:latest`. A local image override skips that pull. Images must advertise the current configuration and network-policy layout. If the published image is older, the launcher builds a matching `pi-sandbox:config-local` image from the sources beside the launcher, without publishing it. An incompatible explicit override fails with a rebuild instruction. Rebuild after changing the Dockerfile, Python entrypoints, or either sandbox JSON profile.
+Without `SANDBOX_IMAGE`, the launcher pulls `jasonbaker/sandbox:latest`. A local image override skips that pull. Images must advertise the current configuration and network-policy layout. If the published image is older, the launcher builds a matching `sandbox:config-local` image from the sources beside the launcher, without publishing it. An incompatible explicit override fails with a rebuild instruction. Rebuild after changing the Dockerfile, Python entrypoints, or either sandbox JSON profile.
 
 ## Usage
 
 ```bash
-./pi-sandbox.sh
-./pi-sandbox.sh /path/to/project
-./pi-sandbox.sh --agent omp /path/to/project
-./pi-sandbox.sh --ssh-agent /path/to/project
-./pi-sandbox.sh --dns 100.100.100.100 /path/to/project
-./pi-sandbox.sh --help
+./sandbox.sh
+./sandbox.sh /path/to/project
+./sandbox.sh --agent omp /path/to/project
+./sandbox.sh --ssh-agent /path/to/project
+./sandbox.sh --dns 100.100.100.100 /path/to/project
+./sandbox.sh --help
 ```
 
 The launcher passes `--dns 100.100.100.100` to smolvm, the Tailscale resolver address, unless you pass `--dns` yourself. See [Tailnet DNS](#tailnet-dns) for why that address is the right default.
@@ -54,19 +54,19 @@ The workload retains only filesystem capabilities needed to edit host-owned work
 Symlink the launcher into a directory on your `PATH`:
 
 ```bash
-ln -s /path/to/pi-sandbox.sh /usr/local/bin/pi-sandbox
-pi-sandbox /path/to/project
+ln -s /path/to/sandbox.sh /usr/local/bin/sandbox
+sandbox /path/to/project
 ```
 
 ## Reusing and Reclaiming VMs
 
-`pi-sandbox-vm.py` reuses a VM that is already serving a project, and reclaims
+`sandbox-vm.py` reuses a VM that is already serving a project, and reclaims
 VMs that an interrupted run left behind.
 
 Start a sandbox for a directory and it picks up whatever exists there:
 
 ```bash
-./pi-sandbox-vm.py reuse --target ~/src/api
+./sandbox-vm.py reuse --target ~/src/api
 ```
 
 There are two outcomes.
@@ -74,7 +74,7 @@ There are two outcomes.
 - A VM for that directory is running with a live launcher: the command prints
   its name and exits. That terminal is the session; nothing new starts.
 - A VM for that directory is running with a dead launcher, or none is running:
-  `pi-sandbox.sh` starts for that directory, including the first run ever.
+  `sandbox.sh` starts for that directory, including the first run ever.
 
 Sessions and history survive every case. They live in host directories mounted
 into each VM, so a new VM sees the work of the previous one.
@@ -90,15 +90,15 @@ whose terminal closes, leaks the VM: it stays in `smolvm machine ls` as
 `running (eph)`, holding its memory. Reclaim those VMs with:
 
 ```bash
-./pi-sandbox-vm.py list            # show VMs and who owns them
-./pi-sandbox-vm.py reap --dry-run  # report what would stop
-./pi-sandbox-vm.py reap            # stop abandoned VMs, free memory
+./sandbox-vm.py list            # show VMs and who owns them
+./sandbox-vm.py reap --dry-run  # report what would stop
+./sandbox-vm.py reap            # stop abandoned VMs, free memory
 ```
 
 `reap` judges each VM by process ownership. A live launcher is an ancestor of
 its VM's boot process, so an attached VM is kept. A leaked VM's boot process
 has been reparented to launchd, so `reap` stops it. Only VMs running the
-pi-sandbox image are considered; other smolvm machines are untouched. `list`
+sandbox image are considered; other smolvm machines are untouched. `list`
 reports the same result as `attached` or `detached`.
 
 `reap --include-named` includes detached named machines (created with
@@ -115,7 +115,7 @@ The host sources and VM-local copies are separate:
 | Pi | `/root/.pi-host` from host `~/.pi` | `$HOME/.pi`, including `$HOME/.pi/agent` |
 | omp | `/root/.omp-host` from host `~/.omp` | `$HOME/.omp`, including `$HOME/.omp/agent` |
 
-At startup, `pi-agent-seed.py` snapshots each source into its own private directory. Root-level configuration, agent settings, credentials, extensions, and named profiles retain their directory structure. There is no global `PI_CODING_AGENT_DIR` override to mix the agents' settings or credentials.
+At startup, `vm-seed.py` snapshots each source into its own private directory. Root-level configuration, agent settings, credentials, extensions, and named profiles retain their directory structure. There is no global `PI_CODING_AGENT_DIR` override to mix the agents' settings or credentials.
 
 Seeding runs before the shell starts and only once per VM. Nested shells do not refresh the snapshot or overwrite changes made by an agent. Host configuration changes take effect in the next VM, not in an existing VM's private copy. VM-local settings and refreshed tokens are discarded when the VM exits. The mounted source directories remain live and readable.
 
@@ -163,7 +163,7 @@ When `LLM_BASE_URL` is unset or empty, nonempty `ANTHROPIC_API_KEY` and `OPENAI_
 
 ```bash
 export ANTHROPIC_API_KEY="..."
-./pi-sandbox.sh /path/to/project
+./sandbox.sh /path/to/project
 ```
 
 The agents can also use credentials from their copied configuration.
@@ -172,7 +172,7 @@ The agents can also use credentials from their copied configuration.
 
 ```bash
 export LLM_BASE_URL="https://spark1.taild8834b.ts.net"
-./pi-sandbox.sh /path/to/project
+./sandbox.sh /path/to/project
 ```
 
 The endpoint is passed unchanged as `OPENAI_BASE_URL` and `LLM_BASE_URL` through `--secret-env`, without printing it. When it is set, the two forwarded cloud API key variables are omitted; credentials already in shared configuration are not removed.
@@ -184,7 +184,7 @@ There is no automatic host-loopback or LAN rewriting. `localhost` means the VM i
 `sandbox-network.json` names a MagicDNS host, so the guest needs a resolver that knows tailnet names. smolvm's resolver forwards to public nameservers by default, and those do not, which is why the launcher sets `--dns 100.100.100.100` when you don't. That address is Tailscale's resolver, defined in [tailscale/hostenv](https://pkg.go.dev/tailscale.com/tsd/tailnetsock) as `100.100.100.100`; it answers tailnet names and forwards everything else to public nameservers, so it behaves like the public default wherever Tailscale is absent. Passing `--dns` replaces it:
 
 ```bash
-./pi-sandbox.sh --dns 1.1.1.1 /path/to/project
+./sandbox.sh --dns 1.1.1.1 /path/to/project
 ```
 
 Note this requires the host's Tailscale connection and DNS service to be available. It fixes resolver selection; it does not enroll the VM as a separate Tailscale node or give it an independent access policy. Tailnet connections through the host can still use the host's permissions. If startup reports `resolving tailnet host ... failed`, the host is not resolving MagicDNS names: check `tailscale status` and `dscacheutil -q host -a name spark1.taild8834b.ts.net` there.
@@ -203,7 +203,7 @@ Note this requires the host's Tailscale connection and DNS service to be availab
 
 The rule constrains destination IPs and TCP ports, not HTTP paths or the contents of HTTPS requests. Public Internet access still permits external proxies and data upload.
 
-`pi-sandbox.smolfile` runs trusted network init with VM-grade privileges. The launcher forces `virtio-net` so packets pass through the guest kernel and uses `--no-init-cache` so every VM gets fresh rules and resolver addresses. The seeder then uses `setpriv` to retain only `CAP_DAC_OVERRIDE` and `CAP_FOWNER`, with no ambient/inheritable capabilities and `no_new_privs`. The workload cannot modify nftables, create raw packet sockets, or regrant network privileges. These rules are inside the VM; no host firewall or tailnet ACL is changed.
+`sandbox.smolfile` runs trusted network init with VM-grade privileges. The launcher forces `virtio-net` so packets pass through the guest kernel and uses `--no-init-cache` so every VM gets fresh rules and resolver addresses. The seeder then uses `setpriv` to retain only `CAP_DAC_OVERRIDE` and `CAP_FOWNER`, with no ambient/inheritable capabilities and `no_new_privs`. The workload cannot modify nftables, create raw packet sockets, or regrant network privileges. These rules are inside the VM; no host firewall or tailnet ACL is changed.
 
 ## Security Boundaries
 
@@ -218,7 +218,7 @@ The rule constrains destination IPs and TCP ports, not HTTP paths or the content
 
 ## Image Builds and Publishing
 
-`Dockerfile.pi` includes Node.js 24, pinned Pi and omp releases, Python, uv, DuckDB, git, ripgrep, build tools, zsh, nftables, and util-linux. System Python supplies SQLite snapshots; `nft` installs the kernel policy and `setpriv` confines workload capabilities. No host Python dependency is required.
+`Dockerfile` includes Node.js 24, pinned Pi and omp releases, Python, uv, DuckDB, git, ripgrep, build tools, zsh, nftables, and util-linux. System Python supplies SQLite snapshots; `nft` installs the kernel policy and `setpriv` confines workload capabilities. No host Python dependency is required.
 
 The launcher first exports with `docker save`. If that archive is incompatible with smolvm, it uses buildx's **Docker** exporter, not an OCI archive. Export failures stop launch; replacement of the cached archive happens only after a successful export and compatibility check. Existing buildx builders are not selected, created, or deleted by the launcher. Registry-backed export fallback uses an immutable digest. A local-only image needs a selected Docker-driver builder if `docker save` cannot export it.
 
@@ -247,18 +247,18 @@ Real Pi session APIs and the real omp CLI create, discover, and continue native 
 To use an existing Docker-format image archive:
 
 ```bash
-PI_SANDBOX_VERIFY_IMAGE_TAR=/path/to/image.tar ./verify-guest.sh
+SANDBOX_VERIFY_IMAGE_TAR=/path/to/image.tar ./verify-guest.sh
 ```
 
 ## Files
 
-- `Dockerfile.pi`: guest image and entrypoint.
-- `pi-sandbox.sh`: host launcher and mount validation.
-- `pi-sandbox-vm.py`: reuse a project's VM, reclaim abandoned VMs.
-- `pi-agent-seed.py`: private, per-agent configuration snapshots.
-- `pi-network-policy.py`: pinned tailnet HTTPS exception and kernel egress policy.
+- `Dockerfile`: guest image and entrypoint.
+- `sandbox.sh`: host launcher and mount validation.
+- `sandbox-vm.py`: reuse a project's VM, reclaim abandoned VMs.
+- `vm-seed.py`: private, per-agent configuration snapshots.
+- `vm-network.py`: pinned tailnet HTTPS exception and kernel egress policy.
 - `sandbox-network.json`: permitted tailnet hostname and TCP port.
-- `pi-sandbox.smolfile`: trusted per-VM network initialization.
+- `sandbox.smolfile`: trusted per-VM network initialization.
 - `sandbox.json.autonomous`: Pi sandbox extension policy.
 - `verify-guest.sh`: real-guest security smoke checks.
 - `build.sh`: multi-platform build and registry publishing.

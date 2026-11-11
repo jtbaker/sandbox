@@ -1,0 +1,4 @@
+net = true
+
+[dev]
+init = ["/usr/local/bin/vm-network.py"]

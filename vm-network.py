@@ -11,8 +11,8 @@ import subprocess
 import sys
 import tempfile
 
-DEFAULT_CONFIG = Path("/opt/pi-sandbox/network.json")
-MARKER = Path("/run/pi-sandbox-network.json")
+DEFAULT_CONFIG = Path("/opt/sandbox/network.json")
+MARKER = Path("/run/sandbox-network.json")
 TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 # Deny special-purpose space before the final IPv4 Internet allowance. Keep
@@ -101,24 +101,24 @@ def nft_rules(addresses, dns_servers, port):
     # Flushing our table and adding the entire policy is one nft transaction;
     # no other table is touched, and no intermediate open policy is visible.
     rules = [
-        "add table inet pi_sandbox",
-        "flush table inet pi_sandbox",
-        "add chain inet pi_sandbox egress { type filter hook output priority 0; policy drop; }",
-        'add rule inet pi_sandbox egress oifname "lo" accept',
+        "add table inet sandbox",
+        "flush table inet sandbox",
+        "add chain inet sandbox egress { type filter hook output priority 0; policy drop; }",
+        'add rule inet sandbox egress oifname "lo" accept',
     ]
     for address in dns_servers:
         family = "ip" if address.version == 4 else "ip6"
         for protocol in ("udp", "tcp"):
-            rules.append(f"add rule inet pi_sandbox egress {family} daddr {address} {protocol} dport 53 accept")
+            rules.append(f"add rule inet sandbox egress {family} daddr {address} {protocol} dport 53 accept")
     for address in addresses:
         family = "ip" if address.version == 4 else "ip6"
-        rules.append(f"add rule inet pi_sandbox egress {family} daddr {address} tcp dport {port} accept")
+        rules.append(f"add rule inet sandbox egress {family} daddr {address} tcp dport {port} accept")
     for family, networks in (("ip", NONPUBLIC_V4), ("ip6", NONPUBLIC_V6)):
-        rules.append(f"add rule inet pi_sandbox egress {family} daddr {{ {', '.join(networks)} }} counter reject")
+        rules.append(f"add rule inet sandbox egress {family} daddr {{ {', '.join(networks)} }} counter reject")
     rules.extend((
-        "add rule inet pi_sandbox egress meta nfproto ipv4 accept",
-        "add rule inet pi_sandbox egress ip6 daddr 2000::/3 accept",
-        "add rule inet pi_sandbox egress counter reject",
+        "add rule inet sandbox egress meta nfproto ipv4 accept",
+        "add rule inet sandbox egress ip6 daddr 2000::/3 accept",
+        "add rule inet sandbox egress counter reject",
     ))
     return "\n".join(rules) + "\n"
 
@@ -149,7 +149,7 @@ def install(config_path):
     }
     temporary = None
     try:
-        fd, temporary = tempfile.mkstemp(prefix=".pi-sandbox-network-", dir=MARKER.parent)
+        fd, temporary = tempfile.mkstemp(prefix=".sandbox-network-", dir=MARKER.parent)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(marker, stream, sort_keys=True)
             stream.write("\n")
@@ -165,12 +165,12 @@ def install(config_path):
 
 def main():
     if len(sys.argv) > 2:
-        print("usage: pi-network-policy.py [network.json]", file=sys.stderr)
+        print("usage: vm-network.py [network.json]", file=sys.stderr)
         return 1
     try:
         install(Path(sys.argv[1]) if len(sys.argv) == 2 else DEFAULT_CONFIG)
     except RuntimeError as error:
-        print(f"pi-network-policy: {error}", file=sys.stderr)
+        print(f"network-policy: {error}", file=sys.stderr)
         return 1
     return 0
 

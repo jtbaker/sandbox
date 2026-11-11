@@ -4,16 +4,16 @@ on:
   push:
     branches: [main]
     paths:
-      - Dockerfile.pi
-      - pi-agent-seed.py
-      - pi-network-policy.py
+      - Dockerfile
+      - vm-seed.py
+      - vm-network.py
       - sandbox-network.json
       - sandbox.json.autonomous
       - .github/workflows/build-image.yml
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: jasonbaker/pi-sandbox
+  IMAGE_NAME: jasonbaker/sandbox
 
 jobs:
   build:
@@ -34,7 +34,7 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          file: Dockerfile.pi
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64
           outputs: type=registry,compression=zstd,compression-level=22,force-compression=true,oci-mediatypes=true
           tags: |

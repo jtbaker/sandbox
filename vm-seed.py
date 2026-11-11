@@ -21,9 +21,9 @@ SKIP_DIRS = {"sessions", "terminal-sessions", "cache", "caches", "logs", "bin",
 # Host runtime trees are not configuration. Limit this rule to config roots
 # so portable extension/package directories with these names remain intact.
 RUNTIME_DIRS = {"run", "ssh-control", "puppeteer", "natives", ".supervisor"}
-PROFILE = Path("/opt/pi-sandbox/sandbox.json.autonomous")
-MARKER = Path("/run/pi-sandbox.seeded")
-NETWORK_MARKER = Path("/run/pi-sandbox-network.json")
+PROFILE = Path("/opt/sandbox/sandbox.json.autonomous")
+MARKER = Path("/run/sandbox.seeded")
+NETWORK_MARKER = Path("/run/sandbox-network.json")
 
 
 def backup_database(source, destination):
@@ -234,10 +234,10 @@ def prepare_private_home(home):
 
 
 def prepare_workspace_alias():
-    value = os.environ.get("PI_SANDBOX_WORKSPACE_ALIAS")
+    value = os.environ.get("SANDBOX_WORKSPACE_ALIAS")
     if not value:
         return
-    alias = absolute_path(value, "PI_SANDBOX_WORKSPACE_ALIAS")
+    alias = absolute_path(value, "SANDBOX_WORKSPACE_ALIAS")
     if Path("/tmp") not in alias.parents:
         raise RuntimeError("workspace alias must name a project below /tmp")
     ensure_directory(alias.parent)
@@ -246,13 +246,13 @@ def prepare_workspace_alias():
 
 def seed():
     if not NETWORK_MARKER.is_file():
-        raise RuntimeError("network policy was not initialized; launch through pi-sandbox.sh")
-    if os.environ.get("PI_SANDBOX_PERSIST_SESSIONS") != "1":
-        raise RuntimeError("persistent session mounts are required; launch through pi-sandbox.sh")
+        raise RuntimeError("network policy was not initialized; launch through sandbox.sh")
+    if os.environ.get("SANDBOX_PERSIST_SESSIONS") != "1":
+        raise RuntimeError("persistent session mounts are required; launch through sandbox.sh")
     home = absolute_path(os.environ.get("HOME", ""), "HOME")
     temporary = absolute_path(os.environ.get("TMPDIR", ""), "TMPDIR")
     os.umask(0o077)
-    with open("/run/pi-sandbox-seed.lock", "w") as lock:
+    with open("/run/sandbox-seed.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         mounts = mount_paths()
         if home in mounts or home.is_mount():
@@ -272,7 +272,7 @@ def seed():
                 os.chmod(directory, 0o700)
         # Stage both roots before installing either. State directories are
         # excluded before traversal; their permissions and contents stay intact.
-        with tempfile.TemporaryDirectory(prefix=".pi-sandbox-seed-", dir=home) as tmp:
+        with tempfile.TemporaryDirectory(prefix=".sandbox-seed-", dir=home) as tmp:
             staged = []
             for source, destination, shared in layouts:
                 snapshot = Path(tmp) / destination.name
@@ -300,7 +300,7 @@ if __name__ == "__main__":
     except Exception as error:
         # Our RuntimeError messages describe paths/operations, never file data.
         detail = str(error) if isinstance(error, RuntimeError) else type(error).__name__
-        print(f"pi-sandbox: configuration seeding failed: {detail}", file=sys.stderr)
+        print(f"sandbox: configuration seeding failed: {detail}", file=sys.stderr)
         sys.exit(1)
     command = sys.argv[1:] or ["zsh", "-l"]
     # Keep only filesystem permissions needed to edit host-owned workspace

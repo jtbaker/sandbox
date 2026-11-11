@@ -7,11 +7,11 @@ as `running (eph)` and its `_boot-vm` process stays alive with no host process
 attached.
 
 `reuse` picks the VM already mounted on a project directory when a live
-launcher still owns it, and otherwise starts `pi-sandbox.sh` for that
+launcher still owns it, and otherwise starts `sandbox.sh` for that
 directory. A VM is never restarted in place, because smolvm skips init on
 restart and init is what installs the pinned tailnet policy. `reap` stops
 leaked VMs. Both decide ownership from the process tree, never from files, and
-touch no VM that did not boot the pi-sandbox image.
+touch no VM that did not boot the sandbox image.
 """
 
 import argparse
@@ -26,9 +26,9 @@ import time
 
 SMOLVM = os.environ.get("SMOLVM", "smolvm")
 # smolvm names ephemeral VMs vm-XXXXXXXX and names saved machines after the
-# --name it was given, which is pi-sandbox-<project>-<hash>.
+# --name it was given, which is sandbox-<project>-<hash>.
 EPHEMERAL_NAME = re.compile(r"^vm-[0-9a-f]{8}$")
-SAVED_NAME = re.compile(r"^pi-sandbox-[a-z0-9][a-z0-9._-]{0,63}$")
+SAVED_NAME = re.compile(r"^sandbox-[a-z0-9][a-z0-9._-]{0,63}$")
 # The launcher exports the resolved image to a tar, so smolvm records the local
 # archive identity, not the Docker image id.
 LOCAL_IMAGE = re.compile(r"^local:[0-9a-f]{64}$")
@@ -112,8 +112,8 @@ def attach_state(record, owned, booting):
 
     Ownership is the process relationship, not a saved file: `record.pid` is
     the VM's boot process, and only an attached run is its ancestor. An
-    interrupted `pi-sandbox.sh` leaks a `vm-*` machine with no such ancestor.
-    A machine named by `machine run --name` (for example `pi-sandbox-app-1`)
+    interrupted `sandbox.sh` leaks a `vm-*` machine with no such ancestor.
+    A machine named by `machine run --name` (for example `sandbox-app-1`)
     has a persistent record and no launcher, so it reports as detached here.
     """
     pid = record.get("pid")
@@ -251,7 +251,7 @@ def do_stop(args):
 
 
 def launcher_path():
-    script = Path(__file__).resolve().with_name("pi-sandbox.sh")
+    script = Path(__file__).resolve().with_name("sandbox.sh")
     if not script.is_file():
         raise RuntimeError(f"launcher not found beside this script: {script}")
     return script
@@ -328,7 +328,7 @@ def main(argv=None):
     try:
         return args.func(args)
     except RuntimeError as error:
-        print(f"pi-sandbox-vm: {error}", file=sys.stderr)
+        print(f"sandbox-vm: {error}", file=sys.stderr)
         return 1
 
 
