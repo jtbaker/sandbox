@@ -1,2 +1,6 @@
 *.env
 ./.supervisor/*
+
+# Python bytecode from the host-side scripts
+__pycache__/
+*.pyc

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build and boot the working tree without publishing. Only synthetic host
 # configuration and session state are mounted; real ~/.pi and ~/.omp stay untouched.
-# Reuse a local Docker archive with PI_SANDBOX_VERIFY_IMAGE_TAR=/path/image.tar.
+# Reuse a local Docker archive with SANDBOX_VERIFY_IMAGE_TAR=/path/image.tar.
 set -euo pipefail
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/pi-sandbox-verify.XXXXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/sandbox-verify.XXXXXXXX")"
 TMP="$(cd "$TMP" && pwd -P)"
 HOST_HOME="$TMP/home"
 HOST_TMPDIR="$TMP/native-tmp"
@@ -30,9 +30,9 @@ trap 'exit 143' TERM
 trap 'printf "FAIL: verifier command failed at line %s\n" "$LINENO" >&2' ERR
 
 command -v smolvm >/dev/null 2>&1 || fail 'smolvm is required'
-IMAGE_TAR="${PI_SANDBOX_VERIFY_IMAGE_TAR:-}"
+IMAGE_TAR="${SANDBOX_VERIFY_IMAGE_TAR:-}"
 if [[ -n "$IMAGE_TAR" ]]; then
-    [[ -f "$IMAGE_TAR" ]] || fail 'PI_SANDBOX_VERIFY_IMAGE_TAR is not a file'
+    [[ -f "$IMAGE_TAR" ]] || fail 'SANDBOX_VERIFY_IMAGE_TAR is not a file'
     IMAGE_TAR="$(cd "$(dirname "$IMAGE_TAR")" && pwd)/$(basename "$IMAGE_TAR")"
 else
     command -v docker >/dev/null 2>&1 || fail 'docker with buildx is required'
@@ -45,7 +45,7 @@ else
     # Use the existing selected builder without creating, selecting, or removing
     # any builder. Docker output embeds the manifest and layers smolvm needs.
     if ! docker buildx build --progress quiet --platform "linux/$ARCH" \
-        -f "$REPO/Dockerfile.pi" --output "type=docker,dest=$IMAGE_TAR" \
+        -f "$REPO/Dockerfile" --output "type=docker,dest=$IMAGE_TAR" \
         "$REPO" > "$TMP/build.log" 2>&1; then
         fail 'working-tree Docker image build failed'
     fi
@@ -68,7 +68,7 @@ net = true
 
 [dev]
 init = [
-    "/usr/local/bin/pi-network-policy.py /verify/network.json",
+    "/usr/local/bin/vm-network.py /verify/network.json",
     "/usr/bin/python3 /verify/network-fixtures.py init",
 ]
 SMOLFILE
@@ -82,8 +82,8 @@ from contextlib import ExitStack
 from pathlib import Path
 
 
-PROOF = Path("/run/pi-sandbox-fixture-network.json")
-PAYLOAD = b"pi-sandbox-local-network-fixture\n"
+PROOF = Path("/run/sandbox-fixture-network.json")
+PAYLOAD = b"sandbox-local-network-fixture\n"
 DROP = [
     "/usr/bin/setpriv", "--bounding-set=-all,+dac_override,+fowner", "--inh-caps=-all",
     "--ambient-caps=-all", "--no-new-privs", "/usr/bin/python3", __file__,
@@ -95,7 +95,7 @@ def command(*args):
 
 
 def reject_packets():
-    ruleset = json.loads(command("nft", "-j", "list", "chain", "inet", "pi_sandbox", "egress"))
+    ruleset = json.loads(command("nft", "-j", "list", "chain", "inet", "sandbox", "egress"))
     return sum(
         expression["counter"]["packets"]
         for item in ruleset["nftables"] if "rule" in item
@@ -133,7 +133,7 @@ def workload():
     editable.chmod(0o600)
     assert editable.read_text() == "guest workspace edit\n"
     denied = subprocess.run(
-        ["nft", "add", "table", "inet", "pi_sandbox_bypass"],
+        ["nft", "add", "table", "inet", "sandbox_bypass"],
         capture_output=True, text=True,
     )
     assert denied.returncode != 0, "capability-dropped workload modified nftables"
@@ -160,7 +160,7 @@ def workload():
     assert proof["deniedIPv4"] == ["100.64.0.10:22", "100.64.0.11:443"]
     assert all(delta >= 1 for delta in proof["rejectCounterDeltas"])
     assert len(proof["rejectCounterDeltas"]) == 2 + int(proof["ipv6Route"])
-    marker = json.loads(Path("/run/pi-sandbox-network.json").read_text())
+    marker = json.loads(Path("/run/sandbox-network.json").read_text())
     assert marker["tailnetHost"] == "100.64.0.10"
     assert marker["httpsPort"] == 443
     assert marker["allowedIPv4"] == ["100.64.0.10"] and marker["allowedIPv6"] == []
@@ -395,7 +395,7 @@ elif sys.argv[1] == "check":
             ]
 elif sys.argv[1] == "stress":
     import runpy
-    module = runpy.run_path("/usr/local/bin/pi-agent-seed.py")
+    module = runpy.run_path("/usr/local/bin/vm-seed.py")
     connect = sqlite3.connect
     with tempfile.TemporaryDirectory(prefix="sqlite-changing-") as temporary:
         source = Path(temporary) / "models.db"
@@ -806,7 +806,7 @@ mode="$1"
 [[ "$HOME" == "$PI_VERIFY_HOME" && "$TMPDIR" == "$PI_VERIFY_TMPDIR" ]] \
     || fail 'canonical HOME or TMPDIR was not mirrored'
 [[ "$PWD" == "$PI_VERIFY_WORKSPACE" && "$PWD" != /workspace ]] || fail 'canonical workspace was not mirrored'
-[[ "$PI_SANDBOX_PERSIST_SESSIONS" == 1 ]] || fail 'persistent session boot flag missing'
+[[ "$SANDBOX_PERSIST_SESSIONS" == 1 ]] || fail 'persistent session boot flag missing'
 [[ -d "$HOME/.pi/agent" && -d "$HOME/.omp/agent" ]] || fail 'native agent directories missing'
 [[ ! -L "$HOME/.pi" && ! -L "$HOME/.omp" && ! -e "$HOME/.pi-agent" ]] || fail 'config roots are not separate native directories'
 /usr/bin/python3 /verify/sessions.py policy || fail 'Pi autonomous sandbox policy missing or changed'
@@ -927,14 +927,14 @@ run_guest() {
         --smolfile "$TMP/Smolfile" --no-init-cache --timeout 240s --mem 2048 --cpus 2
         --workdir "$workspace" --env "HOME=$HOST_HOME" --env "TMPDIR=$HOST_TMPDIR"
         --env "PI_VERIFY_HOME=$HOST_HOME" --env "PI_VERIFY_TMPDIR=$HOST_TMPDIR"
-        --env "PI_VERIFY_WORKSPACE=$workspace" --env PI_SANDBOX_PERSIST_SESSIONS=1)
+        --env "PI_VERIFY_WORKSPACE=$workspace" --env SANDBOX_PERSIST_SESSIONS=1)
     local state
     for state in .pi/agent/sessions .omp/agent/sessions .omp/agent/blobs \
         .omp/profiles/work/agent/sessions .omp/profiles/work/agent/blobs; do
         [[ "$mode" == default && "$state" == .omp/profiles/* ]] && continue
         args+=(-v "$HOST_HOME/$state:$HOST_HOME/$state")
     done
-    local command=(/usr/local/bin/pi-agent-seed.py zsh -l -c 'source /verify/checks.zsh "$1"' verify "$mode")
+    local command=(/usr/local/bin/vm-seed.py zsh -l -c 'source /verify/checks.zsh "$1"' verify "$mode")
     if [[ "$mode" == host ]]; then
         # Same native namespace without seeding, snapshots or a shared index.
         # The image supplies pinned agents; no host tool installation is needed.

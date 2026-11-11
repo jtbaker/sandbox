@@ -1,8 +1,8 @@
 FROM node:24-slim
-LABEL io.pi-sandbox.config-layout="separate-v3"
+LABEL io.sandbox.config-layout="separate-v4"
 
 # Install system utilities commonly needed by coding agents
-# bubblewrap + socat are required by the pi-sandbox extension for in-VM sandboxing
+# bubblewrap + socat are required by the sandbox extension for in-VM sandboxing
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -20,11 +20,11 @@ RUN apt-get update && apt-get install -y \
 # --- Autonomous agent environment ------------------------------------------------
 # Host configuration is read-only; each agent receives its own private snapshot.
 # Seed once at the entrypoint, before any shell or agent can access the copies.
-COPY pi-agent-seed.py /usr/local/bin/pi-agent-seed.py
-COPY pi-network-policy.py /usr/local/bin/pi-network-policy.py
-COPY sandbox-network.json /opt/pi-sandbox/network.json
-COPY sandbox.json.autonomous /opt/pi-sandbox/sandbox.json.autonomous
-RUN chmod +x /usr/local/bin/pi-agent-seed.py /usr/local/bin/pi-network-policy.py
+COPY vm-seed.py /usr/local/bin/vm-seed.py
+COPY vm-network.py /usr/local/bin/vm-network.py
+COPY sandbox-network.json /opt/sandbox/network.json
+COPY sandbox.json.autonomous /opt/sandbox/sandbox.json.autonomous
+RUN chmod +x /usr/local/bin/vm-seed.py /usr/local/bin/vm-network.py
 
 # Install Oh-My-Zsh (unattended)
 RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
@@ -69,5 +69,5 @@ RUN printf '\nPROMPT="🔒 $PROMPT"\n' >> /root/.zshrc
 WORKDIR /
 
 # Start an interactive shell only after configuration seeding succeeds.
-ENTRYPOINT ["/usr/local/bin/pi-agent-seed.py"]
+ENTRYPOINT ["/usr/local/bin/vm-seed.py"]
 CMD ["zsh", "-l"]

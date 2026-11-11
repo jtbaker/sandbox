@@ -1,4 +1,0 @@
-net = true
-
-[dev]
-init = ["/usr/local/bin/pi-network-policy.py"]

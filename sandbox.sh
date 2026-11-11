@@ -2,17 +2,19 @@
 
 set -euo pipefail
 
-IMAGE_NAME="${PI_SANDBOX_IMAGE-jasonbaker/pi-sandbox:latest}"
+IMAGE_NAME="${SANDBOX_IMAGE-jasonbaker/sandbox:latest}"
 AGENT="${AGENT-pi}"
 SSH_AGENT=false
 DNS_SERVER=""
+# The image's TERM, kept in step with Dockerfile.
+VM_TERM=xterm-256color
 TARGET_SET=false
 
 # Validate all user-controlled launch settings before Docker or VM activity.
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
-            echo "Usage: pi-sandbox [options] [target_directory]"
+            echo "Usage: sandbox [options] [target_directory]"
             echo "Starts an interactive login shell inside an ephemeral smolvm microVM."
             echo "Pi and omp sessions/attachments share normal host history and survive VM exit."
             echo "Do not edit the same session from multiple host/VM processes at once."
@@ -20,13 +22,17 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --agent NAME        Startup hint: pi (default) or omp; does not launch it."
             echo "  --ssh-agent         Opt in to forwarding the socket in SSH_AUTH_SOCK."
-            echo "  --dns IP            Guest DNS resolver (e.g. 100.100.100.100 for MagicDNS)."
+            echo "  --dns IP            Guest DNS resolver (default 100.100.100.100, the"
+            echo "                      Tailscale resolver; pass a public resolver to override)."
             echo "  -h, --help          Show this help message"
             echo ""
             echo "Environment Variables:"
             echo "  AGENT               Startup hint: pi or omp (--agent overrides)."
-            echo "  PI_SANDBOX_IMAGE    Use an existing local image instead of pulling latest."
+            echo "  SANDBOX_IMAGE    Use an existing local image instead of pulling latest."
             echo "                      Export fallback may fetch its immutable registry digest."
+            echo "  TERM                Passed to the guest when it names a terminal the guest"
+            echo "                      can drive (xterm*, screen*, tmux*, vt100, vt102, linux);"
+            echo "                      otherwise the guest uses $VM_TERM."
             echo "  LLM_BASE_URL        Custom endpoint; disables cloud API key forwarding."
             echo "  ANTHROPIC_API_KEY   Forwarded only when LLM_BASE_URL is empty."
             echo "  OPENAI_API_KEY      Forwarded only when LLM_BASE_URL is empty."
@@ -88,7 +94,7 @@ if [[ "$AGENT" != pi && "$AGENT" != omp ]]; then
     exit 1
 fi
 if [[ ! "$IMAGE_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/@:-]*$ ]]; then
-    echo "Error: PI_SANDBOX_IMAGE must be a nonempty Docker image reference." >&2
+    echo "Error: SANDBOX_IMAGE must be a nonempty Docker image reference." >&2
     exit 1
 fi
 if ! command -v realpath >/dev/null 2>&1; then
@@ -248,17 +254,38 @@ fi
 
 SCRIPT_PATH=$(realpath -- "${BASH_SOURCE[0]}")
 REPO_DIR="${SCRIPT_PATH%/*}"
-SMOLFILE="$REPO_DIR/pi-sandbox.smolfile"
+SMOLFILE="$REPO_DIR/sandbox.smolfile"
 if [[ ! -f "$SMOLFILE" ]]; then
-    echo "Error: pi-sandbox.smolfile must be beside the launcher for trusted network initialization." >&2
+    echo "Error: sandbox.smolfile must be beside the launcher for trusted network initialization." >&2
     exit 1
 fi
 SMOLVM_ARGS=(machine run -it --net --net-backend virtio-net --smolfile "$SMOLFILE" \
     --no-init-cache --unprivileged --mem 2048 --cpus 4 \
     --workdir "$TARGET_DIR" --env "HOME=$HOST_HOME" --env "TMPDIR=$HOST_TMPDIR" \
-    --env PI_SANDBOX_PERSIST_SESSIONS=1)
+    --env SANDBOX_PERSIST_SESSIONS=1)
 if [[ -n "$WORKSPACE_ALIAS" ]]; then
-    SMOLVM_ARGS+=(--env "PI_SANDBOX_WORKSPACE_ALIAS=$WORKSPACE_ALIAS")
+    SMOLVM_ARGS+=(--env "SANDBOX_WORKSPACE_ALIAS=$WORKSPACE_ALIAS")
+fi
+# smolvm forwards the host TERM, which overrides the image default. A host TERM
+# of dumb, or a type absent from the guest database, leaves zle without key
+# codes, and arrow keys stop moving through history. Pass the host type when it
+# is a terminal the guest can drive; use the image type otherwise.
+case "${TERM-}" in
+    xterm*|screen*|tmux*|vt100|vt102|linux)
+        SMOLVM_ARGS+=(--env "TERM=$TERM") ;;
+    *)
+        SMOLVM_ARGS+=(--env "TERM=$VM_TERM")
+        if [[ -t 0 && "${TERM-}" != "$VM_TERM" ]]; then
+            echo "Guest terminal set to $VM_TERM (host TERM=${TERM:-unset})." >&2
+        fi ;;
+esac
+if [[ -z "$DNS_SERVER" ]]; then
+    # The smolvm resolver forwards to public nameservers by default, and those
+    # cannot answer MagicDNS names, so trusted init fails resolving
+    # tailnetHost. 100.100.100.100 is Tailscale's resolver address: queries
+    # outside the tailnet go to public nameservers anyway, so this stays the
+    # default whether or not the host runs Tailscale.
+    DNS_SERVER="100.100.100.100"
 fi
 if [[ -n "$DNS_SERVER" ]]; then
     SMOLVM_ARGS+=(--dns "$DNS_SERVER")
@@ -293,8 +320,8 @@ for TOOL in smolvm docker; do
     fi
 done
 
-CACHE_DIR="${HOST_HOME%/}/.cache/pi-sandbox"
-IMAGE_TAR="$CACHE_DIR/pi-sandbox.tar"
+CACHE_DIR="${HOST_HOME%/}/.cache/sandbox"
+IMAGE_TAR="$CACHE_DIR/sandbox.tar"
 IMAGE_ID_FILE="$CACHE_DIR/.image_id"
 mkdir -p "$CACHE_DIR"
 ARCH=$(uname -m)
@@ -304,33 +331,33 @@ case "$ARCH" in
     *) echo "Error: unsupported host architecture: $ARCH" >&2; exit 1 ;;
 esac
 PLATFORM="linux/$ARCH"
-if [[ -n "${PI_SANDBOX_IMAGE+x}" ]]; then
+if [[ -n "${SANDBOX_IMAGE+x}" ]]; then
     echo "Using local image override (skipping docker pull): $IMAGE_NAME"
 else
     docker pull --platform "$PLATFORM" "$IMAGE_NAME"
 fi
 # Reject images built for the old shared-directory/shell-seeder layout before
 # exporting or booting them. A fresh registry pull alone cannot update that code.
-LAYOUT_KEY="io.pi-sandbox.config-layout"
-LAYOUT_VERSION="separate-v3"
+LAYOUT_KEY="io.sandbox.config-layout"
+LAYOUT_VERSION="separate-v4"
 if ! IMAGE_LAYOUT=$(docker image inspect --format "{{index .Config.Labels \"$LAYOUT_KEY\"}}" "$IMAGE_NAME"); then
-    echo "Error: image is unavailable locally; PI_SANDBOX_IMAGE requires an existing local image." >&2
+    echo "Error: image is unavailable locally; SANDBOX_IMAGE requires an existing local image." >&2
     exit 1
 fi
 if [[ "$IMAGE_LAYOUT" != "$LAYOUT_VERSION" ]]; then
-    if [[ -n "${PI_SANDBOX_IMAGE+x}" ]]; then
-        echo "Error: PI_SANDBOX_IMAGE lacks the current configuration seeder; rebuild it from Dockerfile.pi." >&2
+    if [[ -n "${SANDBOX_IMAGE+x}" ]]; then
+        echo "Error: SANDBOX_IMAGE lacks the current configuration seeder; rebuild it from Dockerfile." >&2
         exit 1
     fi
-    if [[ ! -f "$REPO_DIR/Dockerfile.pi" || ! -f "$REPO_DIR/pi-agent-seed.py" ||
-          ! -f "$REPO_DIR/pi-network-policy.py" || ! -f "$REPO_DIR/sandbox-network.json" ||
+    if [[ ! -f "$REPO_DIR/Dockerfile" || ! -f "$REPO_DIR/vm-seed.py" ||
+          ! -f "$REPO_DIR/vm-network.py" || ! -f "$REPO_DIR/sandbox-network.json" ||
           ! -f "$REPO_DIR/sandbox.json.autonomous" ]]; then
         echo "Error: published image is too old; matching image sources must be beside the launcher." >&2
         exit 1
     fi
-    IMAGE_NAME="pi-sandbox:config-local"
+    IMAGE_NAME="sandbox:config-local"
     echo "Published image uses the old configuration layout; building the matching image locally (no push)."
-    docker buildx build --load --platform "$PLATFORM" -f "$REPO_DIR/Dockerfile.pi" \
+    docker buildx build --load --platform "$PLATFORM" -f "$REPO_DIR/Dockerfile" \
         -t "$IMAGE_NAME" "$REPO_DIR"
     IMAGE_LAYOUT=$(docker image inspect --format "{{index .Config.Labels \"$LAYOUT_KEY\"}}" "$IMAGE_NAME")
     if [[ "$IMAGE_LAYOUT" != "$LAYOUT_VERSION" ]]; then
@@ -339,7 +366,7 @@ if [[ "$IMAGE_LAYOUT" != "$LAYOUT_VERSION" ]]; then
     fi
 fi
 if ! IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME"); then
-    echo "Error: image is unavailable locally; PI_SANDBOX_IMAGE requires an existing local image." >&2
+    echo "Error: image is unavailable locally; SANDBOX_IMAGE requires an existing local image." >&2
     exit 1
 fi
 if [[ ! "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -392,7 +419,7 @@ else
             fi
         fi
         if [[ -z "$SOURCE" ]]; then
-            if [[ -z "${PI_SANDBOX_IMAGE+x}" ]]; then
+            if [[ -z "${SANDBOX_IMAGE+x}" ]]; then
                 echo "Error: pulled image has no immutable registry digest for buildx export." >&2
                 exit 1
             fi
@@ -437,4 +464,4 @@ smolvm "${SMOLVM_ARGS[@]}" \
     -v "$HOST_PI_DIR:/root/.pi-host:ro" \
     -v "$HOST_OMP_DIR:/root/.omp-host:ro" \
     --image "$IMAGE_TAR" \
-    -- /usr/local/bin/pi-agent-seed.py zsh -l
+    -- /usr/local/bin/vm-seed.py zsh -l
