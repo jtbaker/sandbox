@@ -456,10 +456,40 @@ else
 fi
 
 echo "Mounting host directory: $TARGET_DIR"
+# Git runs hooks and hook-class helpers (fsmonitor, filters) without a
+# prompt. A writable project mount lets guest work, or an untrusted clone's
+# own git directory, plant a script that host git then executes as the host
+# user. The read-only re-mounts below cover the hook locations git executes
+# from inside the mount: default hooks, linked worktrees (.git/worktrees),
+# and submodule repositories (.git/modules). Published bypasses (sandcastle
+# #1010, the separate-git-dir/fsmonitor Cursor escape) show why one path is
+# not enough. Commit, add, and diff still work: they need only objects, refs
+# and index. Known-open paths are listed in README limits.
+MOUNT_ARGS=(-v "$TARGET_DIR:$TARGET_DIR")
+PROTECTED_PATHS=()
+for candidate in ".git/hooks" ".git/worktrees" ".git/modules"; do
+    [[ -d "$TARGET_DIR/$candidate" ]] && PROTECTED_PATHS+=("$candidate")
+done
+# Each linked worktree keeps its hooks in a sibling directory of its own
+# config, so protect those hooks without covering config-adjacent files.
+for worktree in "$TARGET_DIR"/.git/worktrees/*/hooks; do
+    relative="${worktree#"$TARGET_DIR"/.git/worktrees/}"
+    PROTECTED_PATHS+=(".git/worktrees/${relative%/hooks}/hooks")
+done
+if [[ ${#PROTECTED_PATHS[@]} -gt 0 ]]; then
+    for candidate in "${PROTECTED_PATHS[@]}"; do
+        # Skip literal non-matches from the worktree loop (no nullglob here).
+        [[ -d "$TARGET_DIR/$candidate" ]] || continue
+        MOUNT_ARGS+=(-v "$TARGET_DIR/$candidate:$TARGET_DIR/$candidate:ro")
+    done
+    echo "Read-only in guest: ${PROTECTED_PATHS[*]} (git execution paths)."
+else
+    echo "Note: no git metadata found in the workspace mount."
+fi
 echo "Starting an interactive shell; run $AGENT when ready. Sessions persist in normal host history."
 echo "Do not edit the same session from multiple host/VM processes at once."
 smolvm "${SMOLVM_ARGS[@]}" \
-    -v "$TARGET_DIR:$TARGET_DIR" \
+    "${MOUNT_ARGS[@]}" \
     "${STATE_MOUNTS[@]}" \
     -v "$HOST_PI_DIR:/root/.pi-host:ro" \
     -v "$HOST_OMP_DIR:/root/.omp-host:ro" \
