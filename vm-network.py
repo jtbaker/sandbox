@@ -4,12 +4,12 @@
 import ipaddress
 import json
 import os
-from pathlib import Path
 import re
 import socket
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 DEFAULT_CONFIG = Path("/opt/sandbox/network.json")
 MARKER = Path("/run/sandbox-network.json")
@@ -18,14 +18,27 @@ TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 # Deny special-purpose space before the final IPv4 Internet allowance. Keep
 # multicast, reserved space and transition mechanisms out, not just RFC1918.
 NONPUBLIC_V4 = (
-    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
-    "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16",
-    "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
-    "224.0.0.0/4", "240.0.0.0/4",
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.2.0/24",
+    "192.88.99.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
 )
 NONPUBLIC_V6 = (
-    "2001::/23", "2001:db8::/32", "2002::/16", "3fff::/20",
+    "2001::/23",
+    "2001:db8::/32",
+    "2002::/16",
+    "3fff::/20",
 )
 
 
@@ -47,8 +60,10 @@ def load_config(path):
         ipaddress.ip_address(host)
     except ValueError:
         labels = host.removesuffix(".").split(".")
-        if not all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
-                   for label in labels):
+        if not all(
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in labels
+        ):
             raise RuntimeError("validating tailnetHost failed") from None
     if type(port) is not int or not 1 <= port <= 65535:
         raise RuntimeError(f"validating TCP port for {host} failed")
@@ -60,9 +75,13 @@ def resolve_tailnet(host, port):
         addresses = {ipaddress.ip_address(host)}
     except ValueError:
         try:
-            answers = socket.getaddrinfo(host, port, family=socket.AF_UNSPEC,
-                                         type=socket.SOCK_STREAM,
-                                         proto=socket.IPPROTO_TCP)
+            answers = socket.getaddrinfo(
+                host,
+                port,
+                family=socket.AF_UNSPEC,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            )
             addresses = {ipaddress.ip_address(answer[4][0]) for answer in answers}
         except (OSError, ValueError) as error:
             raise RuntimeError(f"resolving tailnet host {host} failed") from error
@@ -71,7 +90,9 @@ def resolve_tailnet(host, port):
     for address in addresses:
         network = TAILNET_V4 if address.version == 4 else TAILNET_V6
         if address not in network or getattr(address, "scope_id", None) is not None:
-            raise RuntimeError(f"validating resolved addresses for {host} failed: outside Tailscale space")
+            raise RuntimeError(
+                f"validating resolved addresses for {host} failed: outside Tailscale space"
+            )
     return sorted(addresses, key=lambda address: (address.version, int(address)))
 
 
@@ -109,17 +130,25 @@ def nft_rules(addresses, dns_servers, port):
     for address in dns_servers:
         family = "ip" if address.version == 4 else "ip6"
         for protocol in ("udp", "tcp"):
-            rules.append(f"add rule inet sandbox egress {family} daddr {address} {protocol} dport 53 accept")
+            rules.append(
+                f"add rule inet sandbox egress {family} daddr {address} {protocol} dport 53 accept"
+            )
     for address in addresses:
         family = "ip" if address.version == 4 else "ip6"
-        rules.append(f"add rule inet sandbox egress {family} daddr {address} tcp dport {port} accept")
+        rules.append(
+            f"add rule inet sandbox egress {family} daddr {address} tcp dport {port} accept"
+        )
     for family, networks in (("ip", NONPUBLIC_V4), ("ip6", NONPUBLIC_V6)):
-        rules.append(f"add rule inet sandbox egress {family} daddr {{ {', '.join(networks)} }} counter reject")
-    rules.extend((
-        "add rule inet sandbox egress meta nfproto ipv4 accept",
-        "add rule inet sandbox egress ip6 daddr 2000::/3 accept",
-        "add rule inet sandbox egress counter reject",
-    ))
+        rules.append(
+            f"add rule inet sandbox egress {family} daddr {{ {', '.join(networks)} }} counter reject"
+        )
+    rules.extend(
+        (
+            "add rule inet sandbox egress meta nfproto ipv4 accept",
+            "add rule inet sandbox egress ip6 daddr 2000::/3 accept",
+            "add rule inet sandbox egress counter reject",
+        )
+    )
     return "\n".join(rules) + "\n"
 
 
@@ -135,8 +164,13 @@ def install(config_path):
     addresses = resolve_tailnet(host, port)
     dns_servers = resolver_addresses(host)
     try:
-        subprocess.run(["nft", "-f", "-"], input=nft_rules(addresses, dns_servers, port),
-                       text=True, capture_output=True, check=True)
+        subprocess.run(
+            ["nft", "-f", "-"],
+            input=nft_rules(addresses, dns_servers, port),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
     except (OSError, subprocess.CalledProcessError) as error:
         # Do not echo nft input or configuration data in diagnostics.
         raise RuntimeError(f"installing nft egress policy for {host} failed") from error
@@ -157,7 +191,9 @@ def install(config_path):
             os.fsync(stream.fileno())
         os.replace(temporary, MARKER)
     except OSError as error:
-        raise RuntimeError(f"writing network policy marker for {host} failed") from error
+        raise RuntimeError(
+            f"writing network policy marker for {host} failed"
+        ) from error
     finally:
         if temporary is not None:
             Path(temporary).unlink(missing_ok=True)
