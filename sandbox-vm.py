@@ -278,7 +278,7 @@ def do_stop(args):
     return 0
 
 
-def exec_shell(record, command=None):
+def exec_shell(record, command=None, workdir=None):
     """Replace this process with a login shell in the VM's workload namespace.
 
     `machine exec` runs inside the guest init namespace, the same namespace as
@@ -290,8 +290,12 @@ def exec_shell(record, command=None):
     """
     # -i -t: own pty for job control and zle. zsh also needs -i: oh-my-zsh
     # applies the theme (with the 🔒 prefix) only under `[[ -o interactive ]]`,
-    # and `zsh -l` alone stays non-interactive even on a tty.
+    # and `zsh -l` alone stays non-interactive even on a tty. -w places the
+    # shell in the project, matching the boot path's `machine run --workdir`:
+    # a login shell without a start directory opens in /.
     argv = ["machine", "exec", "-i", "-t", "--name", record["name"]]
+    if workdir is not None:
+        argv += ["-w", workdir]
     argv += command or ["/bin/zsh", "-i", "-l"]
     sys.stdout.flush()
     launcher = f"exec {shlex.quote(SMOLVM)}"
@@ -327,7 +331,7 @@ def do_reuse(args):
         status, reason = attach_state(running, owned, booting)
         if status == "attached":
             print(f"Joining {running['name']} for {workspace}: {reason}.")
-            exec_shell(running)
+            exec_shell(running, workdir=workspace)
             return 0
         print(
             f"{running['name']} serves {workspace} but {reason}; starting a "
@@ -345,6 +349,31 @@ def do_reuse(args):
     os.execv(argv[0], argv)
 
 
+def guest_project(name):
+    """The project directory a VM mounted, from its own mount table.
+
+    smolvm's machine record carries no cmd args or mount list, so the guest
+    mount table is the only start-hint a named VM has. The launcher mounts
+    the project, the agent session trees, and the read-only host roots; the
+    project is the real filesystem mount with no suffix and no `ro` flag,
+    and it is the first mount in the table. Returns None when no mount
+    matches, in which case the joined shell starts in the VM default.
+    """
+    probe = r"awk '$3 ~ /^(virtiofs|ext4|9p|nfs|fuse)$/ && $2 !~ /^[.\/](dev|proc|sys|run|tmp|boot|media|mnt)(\/|$)/ && $2 !~ /(pi|omp)-host$/ && $2 !~ /\/(sessions|blobs)$/ && $4 !~ /ro[,)]/ {print $2; exit}' /proc/self/mounts"
+    completed = subprocess.run(
+        [SMOLVM, "machine", "exec", "--name", name, "/bin/sh", "-c", probe],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    candidate = completed.stdout.strip().splitlines()
+    if completed.returncode == 0 and candidate:
+        path = candidate[0]
+        if path.startswith("/") and "$" not in path:
+            return path
+    return None
+
+
 def resolve_target(args):
     """The VM to attach: named with --vm, else the one mounted on --target.
 
@@ -358,7 +387,10 @@ def resolve_target(args):
             raise RuntimeError(f"not a sandbox machine name: {args.vm}")
         for record in machines():
             if record.get("name") == args.vm and record.get("state") == "running":
-                return record
+                # Named attach has no workspace hint: smolvm records no cmd
+                # args or mount list for this machine. The guest sees the
+                # project in its mount table, so read it from the VM itself.
+                return record, guest_project(args.vm)
         raise RuntimeError(f"no running sandbox machine named {args.vm}")
     workspace = str(Path(args.target).resolve())
     if not Path(workspace).is_dir():
@@ -375,18 +407,18 @@ def resolve_target(args):
             f"{running['name']} mounts {workspace} but {reason}; "
             "start a fresh VM with sandbox.sh instead"
         )
-    return running
+    return running, workspace
 
 
 def do_attach(args):
-    record = resolve_target(args)
+    record, workspace = resolve_target(args)
     print(f"Attaching to {record['name']}; a login shell starts beside any console.")
     # REMAINDER keeps the user's `--` separator, and `machine exec` takes no
     # separator of its own: the command starts after its flags.
     command = args.command
     if command[:1] == ["--"]:
         command = command[1:]
-    exec_shell(record, command)
+    exec_shell(record, command, workdir=workspace)
     return 0
 
 

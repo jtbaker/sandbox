@@ -476,7 +476,7 @@ if [[ "$JOIN_DECISION" == join\ * ]]; then
     # oh-my-zsh sets the theme (the 🔒 prefix rides on it) only under
     # `[[ -o interactive ]]`. Login ordering stays intact: profile scripts
     # run before zshrc.
-    exec smolvm machine exec -i -t --name "$JOIN_VM" /bin/zsh -i -l
+    exec smolvm machine exec -i -t -w "$TARGET_DIR" --name "$JOIN_VM" /bin/zsh -i -l
 fi
 # Git runs hooks and hook-class helpers (fsmonitor, filters) without a
 # prompt. A writable project mount lets guest work, or an untrusted clone's
