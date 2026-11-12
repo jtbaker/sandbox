@@ -261,6 +261,8 @@ This builds the working tree without publishing and boots disposable microVMs us
 
 Real Pi session APIs and the real omp CLI create, discover, and continue native transcripts across separate VMs. omp default and named profiles replay prior turns and image blobs through a local synthetic model provider. The host observes transcripts, artifacts, and blobs before the first VM exits. A cold-config consumer stage uses the pinned Linux agents at native host paths, without seeding or a shared SQLite index; it does not require host-installed agents. The suite never mounts your real `~/.pi` or `~/.omp`. Failed runs retain their synthetic fixture directory for diagnosis.
 
+Guest checks and fixture programs live in `verification/`. The runner copies them into its temporary control directory and mounts that directory read-only at `/verify`.
+
 To use an existing Docker-format image archive:
 
 ```bash
@@ -271,12 +273,14 @@ SANDBOX_VERIFY_IMAGE_TAR=/path/to/image.tar ./verify-guest.sh
 
 - `Dockerfile`: guest image and entrypoint.
 - `sandbox.sh`: host launcher and mount validation.
+- `lib/image.sh`: image acquisition, layout checks, archive export, and cache cleanup.
 - `sandbox-vm.py`: reuse or attach to a project's VM, reclaim abandoned VMs.
 - `vm-seed.py`: private, per-agent configuration snapshots.
 - `vm-network.py`: pinned tailnet HTTPS exception and kernel egress policy.
 - `sandbox-network.json`: permitted tailnet hostname and TCP port.
 - `sandbox.smolfile`: trusted per-VM network initialization.
 - `sandbox.json.autonomous`: Pi sandbox extension policy.
-- `verify-guest.sh`: real-guest security smoke checks.
+- `verify-guest.sh`: host-side orchestration for real-guest security smoke checks.
+- `verification/`: guest assertions, synthetic network and SQLite fixtures, and agent session checks.
 - `build.sh`: multi-platform build and registry publishing.
 - `.github/workflows/build-image.yml`: automated image publishing.
