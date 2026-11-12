@@ -471,7 +471,12 @@ if [[ "$JOIN_DECISION" == join\ * ]]; then
     else
         echo "Joining $JOIN_VM for this workspace; a login shell starts beside any console."
     fi
-    exec smolvm machine exec --name "$JOIN_VM" /bin/zsh -l
+    # -i -t gives the joined shell its own pty (job control, zle). zsh needs
+    # -i too: `zsh -l` with a tty still reports non-interactive, and
+    # oh-my-zsh sets the theme (the 🔒 prefix rides on it) only under
+    # `[[ -o interactive ]]`. Login ordering stays intact: profile scripts
+    # run before zshrc.
+    exec smolvm machine exec -i -t --name "$JOIN_VM" /bin/zsh -i -l
 fi
 # Git runs hooks and hook-class helpers (fsmonitor, filters) without a
 # prompt. A writable project mount lets guest work, or an untrusted clone's

@@ -288,8 +288,11 @@ def exec_shell(record, command=None):
     PATH is searched for smolvm: the helper's SMOLVM default is a bare name,
     and `os.execv` searches nothing.
     """
-    argv = ["machine", "exec", "--name", record["name"]]
-    argv += command or ["/bin/zsh", "-l"]
+    # -i -t: own pty for job control and zle. zsh also needs -i: oh-my-zsh
+    # applies the theme (with the 🔒 prefix) only under `[[ -o interactive ]]`,
+    # and `zsh -l` alone stays non-interactive even on a tty.
+    argv = ["machine", "exec", "-i", "-t", "--name", record["name"]]
+    argv += command or ["/bin/zsh", "-i", "-l"]
     sys.stdout.flush()
     launcher = f"exec {shlex.quote(SMOLVM)}"
     os.execv(
