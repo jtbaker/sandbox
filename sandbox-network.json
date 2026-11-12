@@ -1,4 +1,16 @@
 {
   "tailnetHost": "spark1.taild8834b.ts.net",
-  "httpsPort": 443
+  "httpsPort": 443,
+  "blockedDomainSuffixes": [
+    "alibaba.com",
+    "alibabacloud.com",
+    "alicloud.com",
+    "aliyun.com",
+    "aliyuncs.com",
+    "aliyuncs.io",
+    "alicdn.com",
+    "npmmirror.com"
+  ],
+  "blockedASNs": [45102, 37963],
+  "feedMaxAgeHours": 168
 }

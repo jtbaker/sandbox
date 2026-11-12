@@ -1,0 +1,8 @@
+net = true
+
+[dev]
+init = [
+    "/usr/bin/python3 /verify/network-fixtures.py prepare",
+    "/usr/local/bin/vm-network.py /verify/network.json /run/sandbox-fixture-feeds",
+    "/usr/bin/python3 /verify/network-fixtures.py init",
+]

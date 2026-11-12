@@ -1,5 +1,5 @@
 FROM node:24-slim
-LABEL io.sandbox.config-layout="separate-v4"
+LABEL io.sandbox.config-layout="separate-v5"
 
 # Install system utilities commonly needed by coding agents
 # bubblewrap + socat are required by the sandbox extension for in-VM sandboxing
@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     python3 \
     iproute2 \
     nftables \
+    dnsmasq-base \
     util-linux \
     bubblewrap \
     socat \
@@ -22,9 +23,12 @@ RUN apt-get update && apt-get install -y \
 # Seed once at the entrypoint, before any shell or agent can access the copies.
 COPY vm-seed.py /usr/local/bin/vm-seed.py
 COPY vm-network.py /usr/local/bin/vm-network.py
+COPY --chmod=0644 network_policy.py /usr/local/bin/network_policy.py
 COPY sandbox-network.json /opt/sandbox/network.json
 COPY sandbox.json.autonomous /opt/sandbox/sandbox.json.autonomous
 RUN chmod +x /usr/local/bin/vm-seed.py /usr/local/bin/vm-network.py
+RUN groupadd --gid 65532 sandbox-dns && \
+    useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin sandbox-dns
 
 # Install Oh-My-Zsh (unattended)
 RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
@@ -61,6 +65,12 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.2
 # omp uses /root/.omp/agent; Pi uses /root/.pi/agent. Do not set the shared
 # PI_CODING_AGENT_DIR override, which would merge their configuration.
 RUN curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v18.18.9
+
+# Native HOME links use these image tools without giving workloads write access.
+RUN command -v pi && command -v omp && chmod 0755 /root && \
+    for directory in /root/.local /root/.omp /root/.oh-my-zsh; do \
+        if [ -d "$directory" ]; then chmod -R a+rX "$directory"; fi; \
+    done
 
 # Prefix the existing theme prompt without changing its contents.
 RUN printf '\nPROMPT="🔒 $PROMPT"\n' >> /root/.zshrc

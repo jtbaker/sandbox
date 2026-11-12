@@ -102,6 +102,14 @@ if ! command -v realpath >/dev/null 2>&1; then
     exit 1
 fi
 
+SANDBOX_UID=$(id -u)
+SANDBOX_GID=$(id -g)
+if [[ ! "$SANDBOX_UID" =~ ^[1-9][0-9]*$ || "$SANDBOX_UID" == 65532 ||
+      ! "$SANDBOX_GID" =~ ^[0-9]+$ ]]; then
+    echo "Error: run the launcher as a non-root user other than the reserved DNS user." >&2
+    exit 1
+fi
+
 # Reject separators both before and after canonicalization: command substitution
 # strips trailing newlines, and symlinks can introduce otherwise hidden paths.
 validate_mount_path() {
@@ -262,6 +270,7 @@ fi
 SMOLVM_ARGS=(machine run -it --net --net-backend virtio-net --smolfile "$SMOLFILE" \
     --no-init-cache --unprivileged --mem 2048 --cpus 4 \
     --workdir "$TARGET_DIR" --env "HOME=$HOST_HOME" --env "TMPDIR=$HOST_TMPDIR" \
+    --env "SANDBOX_UID=$SANDBOX_UID" --env "SANDBOX_GID=$SANDBOX_GID" \
     --env SANDBOX_PERSIST_SESSIONS=1)
 if [[ -n "$WORKSPACE_ALIAS" ]]; then
     SMOLVM_ARGS+=(--env "SANDBOX_WORKSPACE_ALIAS=$WORKSPACE_ALIAS")
@@ -313,7 +322,7 @@ else
     fi
 fi
 
-for TOOL in smolvm docker; do
+for TOOL in smolvm docker python3; do
     if ! command -v "$TOOL" >/dev/null 2>&1; then
         echo "Error: required command not found: $TOOL" >&2
         exit 1
@@ -321,139 +330,23 @@ for TOOL in smolvm docker; do
 done
 
 CACHE_DIR="${HOST_HOME%/}/.cache/sandbox"
-IMAGE_TAR="$CACHE_DIR/sandbox.tar"
-IMAGE_ID_FILE="$CACHE_DIR/.image_id"
+validate_mount_path "$CACHE_DIR"
 mkdir -p "$CACHE_DIR"
-ARCH=$(uname -m)
-case "$ARCH" in
-    x86_64) ARCH=amd64 ;;
-    aarch64|arm64) ARCH=arm64 ;;
-    *) echo "Error: unsupported host architecture: $ARCH" >&2; exit 1 ;;
-esac
-PLATFORM="linux/$ARCH"
+CACHE_DIR=$(realpath -- "$CACHE_DIR")
+validate_mount_path "$CACHE_DIR"
+if [[ "$TARGET_DIR" == "$CACHE_DIR" || "$TARGET_DIR" == "$CACHE_DIR/"* ||
+      "$CACHE_DIR" == "$TARGET_DIR/"* ]]; then
+    echo "Error: workspace must not overlap the sandbox image and network-policy cache." >&2
+    exit 1
+fi
+IMAGE_TAR="$CACHE_DIR/sandbox.tar"
+source "$REPO_DIR/lib/image.sh"
+PULL_IMAGE=true
 if [[ -n "${SANDBOX_IMAGE+x}" ]]; then
-    echo "Using local image override (skipping docker pull): $IMAGE_NAME"
-else
-    docker pull --platform "$PLATFORM" "$IMAGE_NAME"
+    PULL_IMAGE=false
 fi
-# Reject images built for the old shared-directory/shell-seeder layout before
-# exporting or booting them. A fresh registry pull alone cannot update that code.
-LAYOUT_KEY="io.sandbox.config-layout"
-LAYOUT_VERSION="separate-v4"
-if ! IMAGE_LAYOUT=$(docker image inspect --format "{{index .Config.Labels \"$LAYOUT_KEY\"}}" "$IMAGE_NAME"); then
-    echo "Error: image is unavailable locally; SANDBOX_IMAGE requires an existing local image." >&2
-    exit 1
-fi
-if [[ "$IMAGE_LAYOUT" != "$LAYOUT_VERSION" ]]; then
-    if [[ -n "${SANDBOX_IMAGE+x}" ]]; then
-        echo "Error: SANDBOX_IMAGE lacks the current configuration seeder; rebuild it from Dockerfile." >&2
-        exit 1
-    fi
-    if [[ ! -f "$REPO_DIR/Dockerfile" || ! -f "$REPO_DIR/vm-seed.py" ||
-          ! -f "$REPO_DIR/vm-network.py" || ! -f "$REPO_DIR/sandbox-network.json" ||
-          ! -f "$REPO_DIR/sandbox.json.autonomous" ]]; then
-        echo "Error: published image is too old; matching image sources must be beside the launcher." >&2
-        exit 1
-    fi
-    IMAGE_NAME="sandbox:config-local"
-    echo "Published image uses the old configuration layout; building the matching image locally (no push)."
-    docker buildx build --load --platform "$PLATFORM" -f "$REPO_DIR/Dockerfile" \
-        -t "$IMAGE_NAME" "$REPO_DIR"
-    IMAGE_LAYOUT=$(docker image inspect --format "{{index .Config.Labels \"$LAYOUT_KEY\"}}" "$IMAGE_NAME")
-    if [[ "$IMAGE_LAYOUT" != "$LAYOUT_VERSION" ]]; then
-        echo "Error: locally built image has an incompatible configuration layout." >&2
-        exit 1
-    fi
-fi
-if ! IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME"); then
-    echo "Error: image is unavailable locally; SANDBOX_IMAGE requires an existing local image." >&2
-    exit 1
-fi
-if [[ ! "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo "Error: Docker returned an invalid local image identity." >&2
-    exit 1
-fi
-CACHE_KEY="$IMAGE_NAME|$IMAGE_ID|$PLATFORM"
-
-# smolvm requires a Docker archive, not an OCI index or zero-byte blob pointers.
-# This is a compatibility check, not archive integrity/authenticity verification.
-tar_is_complete() {
-    local listing manifest size
-    [[ -f "$1" ]] || return 1
-    listing=$(tar -tf "$1" 2>/dev/null) || return 1
-    [[ $'\n'"$listing"$'\n' == *$'\nmanifest.json\n'* ]] || return 1
-    manifest=$(tar -xOf "$1" manifest.json 2>/dev/null) || return 1
-    [[ -n "$manifest" ]] || return 1
-    size=$(wc -c < "$1") || return 1
-    [[ "$size" -gt 1048576 ]]
-}
-
-CACHED_KEY=""
-if [[ -f "$IMAGE_ID_FILE" ]]; then
-    IFS= read -r CACHED_KEY < "$IMAGE_ID_FILE" || CACHED_KEY=""
-fi
-if [[ "$CACHED_KEY" == "$CACHE_KEY" && -f "$IMAGE_TAR" ]] && tar_is_complete "$IMAGE_TAR"; then
-    echo "Using image cache for current local image: $IMAGE_TAR"
-else
-    STAGE=$(mktemp -d "$CACHE_DIR/.export.XXXXXX")
-    trap 'rm -rf "$STAGE"' EXIT
-    TEMP_TAR="$STAGE/image.tar"
-    echo "Exporting $IMAGE_NAME..."
-    SAVED=false
-    if docker save --output "$TEMP_TAR" "$IMAGE_NAME"; then
-        if tar_is_complete "$TEMP_TAR"; then
-            SAVED=true
-        else
-            echo "docker save produced an unusable archive; trying the buildx Docker exporter." >&2
-        fi
-    else
-        echo "docker save failed; trying the buildx Docker exporter." >&2
-    fi
-    if [[ "$SAVED" != true ]]; then
-        # Use the active builder unchanged. Isolated builders can fetch a pulled
-        # registry image by immutable digest without relying on the local store.
-        SOURCE=""
-        if DIGEST=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE_NAME" 2>/dev/null); then
-            if [[ "$DIGEST" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:-]*@sha256:[0-9a-f]{64}$ ]]; then
-                SOURCE="$DIGEST"
-            fi
-        fi
-        if [[ -z "$SOURCE" ]]; then
-            if [[ -z "${SANDBOX_IMAGE+x}" ]]; then
-                echo "Error: pulled image has no immutable registry digest for buildx export." >&2
-                exit 1
-            fi
-            BUILDER_INFO=$(docker buildx inspect)
-            BUILDER_DRIVER=""
-            while read -r LABEL VALUE REST; do
-                if [[ "$LABEL" == Driver: ]]; then
-                    BUILDER_DRIVER="$VALUE"
-                fi
-            done <<< "$BUILDER_INFO"
-            if [[ "$BUILDER_DRIVER" != docker ]]; then
-                echo "Error: local-only image export needs an existing docker-driver builder; select one or use a registry-backed image." >&2
-                exit 1
-            fi
-            SOURCE="$IMAGE_NAME"
-        fi
-        mkdir "$STAGE/context"
-        printf 'FROM %s\n' "$SOURCE" > "$STAGE/context/Dockerfile"
-        rm -f "$TEMP_TAR"
-        if ! docker buildx build --platform "$PLATFORM" --output "type=docker,dest=$TEMP_TAR" "$STAGE/context"; then
-            echo "Error: buildx Docker archive export failed; cache was not updated." >&2
-            exit 1
-        fi
-        if ! tar_is_complete "$TEMP_TAR"; then
-            echo "Error: exported archive is unusable; cache was not updated." >&2
-            exit 1
-        fi
-    fi
-    printf '%s\n' "$CACHE_KEY" > "$STAGE/image_id"
-    mv -f "$TEMP_TAR" "$IMAGE_TAR"
-    mv -f "$STAGE/image_id" "$IMAGE_ID_FILE"
-    rm -rf "$STAGE"
-    trap - EXIT
-fi
+prepare_image_archive "$IMAGE_NAME" "$CACHE_DIR" "$REPO_DIR" "$PULL_IMAGE"
+"$REPO_DIR/sandbox-vm.py" record-image "$IMAGE_TAR"
 
 echo "Mounting host directory: $TARGET_DIR"
 # Join before mount: a second terminal for this workspace gets a shell in the
@@ -471,13 +364,13 @@ if [[ "$JOIN_DECISION" == join\ * ]]; then
     else
         echo "Joining $JOIN_VM for this workspace; a login shell starts beside any console."
     fi
-    # -i -t gives the joined shell its own pty (job control, zle). zsh needs
-    # -i too: `zsh -l` with a tty still reports non-interactive, and
-    # oh-my-zsh sets the theme (the 🔒 prefix rides on it) only under
-    # `[[ -o interactive ]]`. Login ordering stays intact: profile scripts
-    # run before zshrc.
-    exec smolvm machine exec -i -t -w "$TARGET_DIR" --name "$JOIN_VM" /bin/zsh -i -l
+    exec "$REPO_DIR/sandbox-vm.py" attach --vm "$JOIN_VM" --target "$TARGET_DIR"
 fi
+
+NETWORK_SNAPSHOT=$(python3 "$REPO_DIR/network-feeds.py" \
+    --cache-dir "$CACHE_DIR/network" --config "$REPO_DIR/sandbox-network.json")
+validate_mount_path "$NETWORK_SNAPSHOT"
+SMOLVM_ARGS+=(-v "$NETWORK_SNAPSHOT:/opt/sandbox/feeds:ro")
 # Git runs hooks and hook-class helpers (fsmonitor, filters) without a
 # prompt. A writable project mount lets guest work, or an untrusted clone's
 # own git directory, plant a script that host git then executes as the host

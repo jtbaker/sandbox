@@ -7,6 +7,7 @@ on:
       - Dockerfile
       - vm-seed.py
       - vm-network.py
+      - network_policy.py
       - sandbox-network.json
       - sandbox.json.autonomous
       - .github/workflows/build-image.yml
