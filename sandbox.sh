@@ -102,6 +102,14 @@ if ! command -v realpath >/dev/null 2>&1; then
     exit 1
 fi
 
+SANDBOX_UID=$(id -u)
+SANDBOX_GID=$(id -g)
+if [[ ! "$SANDBOX_UID" =~ ^[1-9][0-9]*$ || "$SANDBOX_UID" == 65532 ||
+      ! "$SANDBOX_GID" =~ ^[0-9]+$ ]]; then
+    echo "Error: run the launcher as a non-root user other than the reserved DNS user." >&2
+    exit 1
+fi
+
 # Reject separators both before and after canonicalization: command substitution
 # strips trailing newlines, and symlinks can introduce otherwise hidden paths.
 validate_mount_path() {
@@ -262,6 +270,7 @@ fi
 SMOLVM_ARGS=(machine run -it --net --net-backend virtio-net --smolfile "$SMOLFILE" \
     --no-init-cache --unprivileged --mem 2048 --cpus 4 \
     --workdir "$TARGET_DIR" --env "HOME=$HOST_HOME" --env "TMPDIR=$HOST_TMPDIR" \
+    --env "SANDBOX_UID=$SANDBOX_UID" --env "SANDBOX_GID=$SANDBOX_GID" \
     --env SANDBOX_PERSIST_SESSIONS=1)
 if [[ -n "$WORKSPACE_ALIAS" ]]; then
     SMOLVM_ARGS+=(--env "SANDBOX_WORKSPACE_ALIAS=$WORKSPACE_ALIAS")
@@ -313,7 +322,7 @@ else
     fi
 fi
 
-for TOOL in smolvm docker; do
+for TOOL in smolvm docker python3; do
     if ! command -v "$TOOL" >/dev/null 2>&1; then
         echo "Error: required command not found: $TOOL" >&2
         exit 1
@@ -321,6 +330,15 @@ for TOOL in smolvm docker; do
 done
 
 CACHE_DIR="${HOST_HOME%/}/.cache/sandbox"
+validate_mount_path "$CACHE_DIR"
+mkdir -p "$CACHE_DIR"
+CACHE_DIR=$(realpath -- "$CACHE_DIR")
+validate_mount_path "$CACHE_DIR"
+if [[ "$TARGET_DIR" == "$CACHE_DIR" || "$TARGET_DIR" == "$CACHE_DIR/"* ||
+      "$CACHE_DIR" == "$TARGET_DIR/"* ]]; then
+    echo "Error: workspace must not overlap the sandbox image and network-policy cache." >&2
+    exit 1
+fi
 IMAGE_TAR="$CACHE_DIR/sandbox.tar"
 source "$REPO_DIR/lib/image.sh"
 PULL_IMAGE=true
@@ -328,6 +346,7 @@ if [[ -n "${SANDBOX_IMAGE+x}" ]]; then
     PULL_IMAGE=false
 fi
 prepare_image_archive "$IMAGE_NAME" "$CACHE_DIR" "$REPO_DIR" "$PULL_IMAGE"
+"$REPO_DIR/sandbox-vm.py" record-image "$IMAGE_TAR"
 
 echo "Mounting host directory: $TARGET_DIR"
 # Join before mount: a second terminal for this workspace gets a shell in the
@@ -345,13 +364,13 @@ if [[ "$JOIN_DECISION" == join\ * ]]; then
     else
         echo "Joining $JOIN_VM for this workspace; a login shell starts beside any console."
     fi
-    # -i -t gives the joined shell its own pty (job control, zle). zsh needs
-    # -i too: `zsh -l` with a tty still reports non-interactive, and
-    # oh-my-zsh sets the theme (the 🔒 prefix rides on it) only under
-    # `[[ -o interactive ]]`. Login ordering stays intact: profile scripts
-    # run before zshrc.
-    exec smolvm machine exec -i -t -w "$TARGET_DIR" --name "$JOIN_VM" /bin/zsh -i -l
+    exec "$REPO_DIR/sandbox-vm.py" attach --vm "$JOIN_VM" --target "$TARGET_DIR"
 fi
+
+NETWORK_SNAPSHOT=$(python3 "$REPO_DIR/network-feeds.py" \
+    --cache-dir "$CACHE_DIR/network" --config "$REPO_DIR/sandbox-network.json")
+validate_mount_path "$NETWORK_SNAPSHOT"
+SMOLVM_ARGS+=(-v "$NETWORK_SNAPSHOT:/opt/sandbox/feeds:ro")
 # Git runs hooks and hook-class helpers (fsmonitor, filters) without a
 # prompt. A writable project mount lets guest work, or an untrusted clone's
 # own git directory, plant a script that host git then executes as the host

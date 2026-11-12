@@ -50,9 +50,12 @@ if [[ "$mode" != default ]]; then
                 [[ ! -e "$level/$excluded" && ! -L "$level/$excluded" ]] || fail 'non-mounted host history, binaries, cache, or trust copied'
             done
         done
-        for link in "$root/symlink-file" "$root/symlink-directory" "$root/broken-symlink" "$root/agent/relative-symlink-file" "$root/agent/relative-symlink-directory"; do
-            [[ ! -e "$link" && ! -L "$link" ]] || fail 'symlink was followed or copied'
+        for link in "$root/symlink-file" "$root/symlink-directory" "$root/broken-symlink" "$root/agent/relative-symlink-directory" "$root/agent/trust-alias.json" "$root/agent/session-alias.json"; do
+            [[ ! -e "$link" && ! -L "$link" ]] || fail 'unsafe, directory, or broken symlink copied'
         done
+        [[ ! -L "$root/agent/relative-symlink-file" ]] || fail 'configuration link was not materialized'
+        cmp -s "$src/agent/extensions/nested/config.txt" "$root/agent/relative-symlink-file" \
+            || fail 'in-root configuration link contents were not copied'
         if (print -r -- forbidden > "$src/write-probe") 2>/dev/null; then
             fail 'source mount allowed file creation'
         fi
@@ -73,6 +76,9 @@ if [[ "$mode" != default ]]; then
             fail 'source mount allowed writes after remount attempt'
         fi
     done
+    [[ ! -L "$HOME/.omp/agent/models.yml" ]] || fail 'cross-agent model link remains a symlink'
+    cmp -s "$HOME/.pi/agent/models.json" "$HOME/.omp/agent/models.yml" \
+        || fail 'cross-agent model configuration was not materialized'
     pass 'fixture: same-named Pi and omp config, root files, and named profiles stay separate'
     pass 'fixture: only native mounted sessions survive; arbitrary nested sessions and private runtime state omitted'
     pass "$mode: host runtime trees omitted while portable extension run directories survive"

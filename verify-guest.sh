@@ -6,6 +6,9 @@ set -euo pipefail
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SANDBOX_UID=$(id -u)
+SANDBOX_GID=$(id -g)
+[[ "$SANDBOX_UID" != 0 && "$SANDBOX_UID" != 65532 ]] || fail 'run verification as a non-root user other than the reserved DNS user'
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sandbox-verify.XXXXXXXX")"
 TMP="$(cd "$TMP" && pwd -P)"
 HOST_HOME="$TMP/home"
@@ -62,7 +65,7 @@ mkdir -p "$TMP/fixtures" "$TMP/control" "$HOST_HOME/project" "$HOST_TMPDIR" "$TM
 for workspace in "$HOST_HOME/project" "$TMP/default-workspace" "$TMP/preparation-workspace"; do
     printf 'host workspace content\n' > "$workspace/editable-host-file"
 done
-printf '{"tailnetHost":"100.64.0.10","httpsPort":443}\n' > "$TMP/control/network.json"
+printf '{"tailnetHost":"100.64.0.10","httpsPort":443,"blockedDomainSuffixes":["aliyuncs.com"],"blockedASNs":[],"feedMaxAgeHours":168}\n' > "$TMP/control/network.json"
 cp "$REPO/verification/Smolfile" "$TMP/Smolfile"
 cp "$REPO/verification/network-fixtures.py" "$TMP/control/network-fixtures.py"
 cp "$REPO/verification/sqlite-fixtures.py" "$TMP/control/sqlite-fixtures.py"
@@ -110,11 +113,14 @@ for agent in pi omp; do
     ln -s /etc "$root/symlink-directory"
     ln -s absent-target "$root/broken-symlink"
     ln -s extensions/nested/config.txt "$root/agent/relative-symlink-file"
+    ln -s trust.json "$root/agent/trust-alias.json"
+    ln -s sessions/fixture-marker "$root/agent/session-alias.json"
     ln -s extensions "$root/agent/relative-symlink-directory"
     find "$root" -type d -exec chmod 0777 {} +
     find "$root" -type f -exec chmod 0666 {} +
     chmod 0777 "$root/agent/extensions/fixture-tool.sh"
 done
+ln -s "$HOST_HOME/.pi/agent/models.json" "$TMP/fixtures/omp/agent/models.yml"
 # State is intentionally separate from read-only configuration fixtures, so the
 # final byte-for-byte config comparison excludes legitimate transcript writes.
 for state in "$HOST_HOME/.pi/agent/sessions" \
@@ -132,12 +138,14 @@ printf '{}\n' > "$TMP/fixtures/omp/profiles/work/agent/config.yml"
 # Prepare genuine live-WAL snapshots using only the image's Python standard
 # library. Writable host mounts contain only disposable synthetic fixtures.
 if ! (cd "$TMP" && smolvm machine run --unprivileged --net-backend virtio-net \
-    --smolfile "$TMP/Smolfile" --no-init-cache --timeout 120s --mem 2048 --cpus 2 \
+    --smolfile "$TMP/Smolfile" --dns 100.64.0.10 --no-init-cache --timeout 120s --mem 2048 --cpus 2 \
+    --env "SANDBOX_UID=$SANDBOX_UID" --env "SANDBOX_GID=$SANDBOX_GID" \
     --workdir "$TMP/preparation-workspace" -v "$TMP/control:/verify:ro" \
     -v "$TMP/preparation-workspace:$TMP/preparation-workspace" \
     -v "$TMP/fixtures:/fixtures" --image "$IMAGE_TAR" \
-    -- /usr/bin/setpriv --bounding-set=-all,+dac_override,+fowner --inh-caps=-all \
-    --ambient-caps=-all --no-new-privs /usr/bin/python3 /verify/sqlite-fixtures.py prepare) \
+    -- /usr/bin/setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+    --clear-groups --reuid "$SANDBOX_UID" --regid "$SANDBOX_GID" --no-new-privs \
+    /usr/bin/python3 /verify/sqlite-fixtures.py prepare) \
     > "$TMP/sqlite-preparation.log" 2>&1; then
     if [[ -f "$TMP/preparation-workspace/failure" ]]; then
         IFS= read -r detail < "$TMP/preparation-workspace/failure"
@@ -151,14 +159,19 @@ printf 'PASS: genuine committed SQLite WAL fixtures prepared without host depend
 # Reading a file may update atime, which ordinary tar headers do not include.
 COPYFILE_DISABLE=1 tar -cf "$TMP/fixtures-before.tar" -C "$TMP/fixtures" pi omp
 
+printf '#!/usr/bin/env bash\nexport HOME=%q\nexec smolvm "$@"\n' "$HOME" > "$TMP/host-smolvm"
+chmod 0700 "$TMP/host-smolvm"
+HOME="$HOST_HOME" "$REPO/sandbox-vm.py" record-image "$IMAGE_TAR"
+
 run_guest() {
     local mode="$1" workspace="$2" result=0 detail vm_pid attempt ready=0 path
     shift 2
     local args=(machine run --unprivileged --net-backend virtio-net
-        --smolfile "$TMP/Smolfile" --no-init-cache --timeout 240s --mem 2048 --cpus 2
+        --smolfile "$TMP/Smolfile" --dns 100.64.0.10 --no-init-cache --timeout 240s --mem 2048 --cpus 2
         --workdir "$workspace" --env "HOME=$HOST_HOME" --env "TMPDIR=$HOST_TMPDIR"
         --env "PI_VERIFY_HOME=$HOST_HOME" --env "PI_VERIFY_TMPDIR=$HOST_TMPDIR"
-        --env "PI_VERIFY_WORKSPACE=$workspace" --env SANDBOX_PERSIST_SESSIONS=1)
+        --env "PI_VERIFY_WORKSPACE=$workspace" --env SANDBOX_PERSIST_SESSIONS=1
+        --env "SANDBOX_UID=$SANDBOX_UID" --env "SANDBOX_GID=$SANDBOX_GID")
     local state
     for state in .pi/agent/sessions .omp/agent/sessions .omp/agent/blobs \
         .omp/profiles/work/agent/sessions .omp/profiles/work/agent/blobs; do
@@ -169,9 +182,7 @@ run_guest() {
     if [[ "$mode" == host ]]; then
         # Same native namespace without seeding, snapshots or a shared index.
         # The image supplies pinned agents; no host tool installation is needed.
-        command=(/usr/bin/setpriv --bounding-set=-all,+dac_override,+fowner
-            --inh-caps=-all --ambient-caps=-all --no-new-privs
-            /usr/bin/python3 /verify/sessions.py host)
+        command=(/usr/bin/python3 /verify/sessions.py host-prepare)
     fi
     rm -f "$workspace/failure" "$workspace/completed" "$workspace/assertions" \
         "$workspace/live-ready" "$workspace/host-observed"
@@ -204,6 +215,11 @@ run_guest() {
                     *) fail 'unexpected live fixture path' ;;
                 esac
             done < "$workspace/live-paths"
+            HOME="$HOST_HOME" SMOLVM="$TMP/host-smolvm" "$REPO/sandbox-vm.py" \
+                attach --target "$workspace" -- /usr/bin/python3 /verify/network-fixtures.py joined \
+                > "$TMP/attachment.log" 2>&1 \
+                || fail 'independent host attachment lost non-root identity, privilege restrictions, or filtered DNS'
+            printf 'PASS: independent host attachment preserves non-root identity, no_new_privs, zero actual capabilities, and filtered DNS\n'
             printf 'host observed live transcripts, artifacts and blobs\n' > "$workspace/host-observed"
             printf 'PASS: real-agent transcripts, artifacts and blobs are host-visible before VM exit\n'
         fi

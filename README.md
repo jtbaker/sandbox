@@ -4,12 +4,14 @@ Run [Pi](https://pi.dev) or [omp](https://omp.sh) inside an ephemeral smolvm mic
 
 ## Prerequisites
 
-- **smolvm** with privileged init, `--net-backend virtio-net`, `--no-init-cache`, and `--secret-env` support. Install with:
+- **smolvm** with privileged init, `--net-backend virtio-net`, `--no-init-cache`, `--secret-env`, and `machine exec` support. Install with:
   ```bash
   curl -sSL https://smolmachines.com/install.sh | bash
   ```
 - **Docker with buildx** and a running daemon, such as Docker Desktop or OrbStack.
 - **realpath** on the host, used to check mount paths before starting Docker or the VM.
+- **Python 3.11+** on the host for feed validation and VM management. No Python packages are required.
+- Run as your normal, non-root host user. UID 65532 is reserved for the guest DNS resolver.
 
 ## Quick Start
 
@@ -28,7 +30,7 @@ To use the published image instead:
 ./sandbox.sh /path/to/project
 ```
 
-Without `SANDBOX_IMAGE`, the launcher pulls `jasonbaker/sandbox:latest`. A local image override skips that pull. Images must advertise the current configuration and network-policy layout. If the published image is older, the launcher builds a matching `sandbox:config-local` image from the sources beside the launcher, without publishing it. An incompatible explicit override fails with a rebuild instruction. Rebuild after changing the Dockerfile, Python entrypoints, or either sandbox JSON profile.
+Without `SANDBOX_IMAGE`, the launcher pulls `jasonbaker/sandbox:latest`. A local image override skips that pull. Images must advertise layout `separate-v5`, which includes non-root entrypoints and filtered DNS. If the published image is older, the launcher builds a matching `sandbox:config-local` image from the sources beside the launcher, without publishing it. An incompatible explicit override fails with a rebuild instruction. Rebuild after changing the Dockerfile, Python image sources, or either sandbox JSON profile. Root-era VMs are not eligible for joining; exit their consoles and start fresh.
 
 ## Usage
 
@@ -47,9 +49,9 @@ The launcher passes `--dns 100.100.100.100` to smolvm, the Tailscale resolver ad
 
 When a VM for that workspace is already running with a live launcher, `sandbox.sh` joins it instead of starting a second VM: a login shell opens inside the existing VM beside its console session, with the same mounts and policy. If the existing VM was started with a different `--agent`, the notice says so; run either agent inside it by hand. A VM whose launcher died, or none running, starts fresh, which keeps the pinned network policy current.
 
-The workspace must be an existing directory. The launcher resolves symlinks and rejects your home directory, its ancestors, and paths that overlap either agent configuration directory. This prevents the writable workspace from exposing the same configuration that is mounted read-only. Paths containing colons or newlines are rejected because they cannot be passed safely through smolvm's volume syntax.
+The workspace must be an existing directory. The launcher resolves symlinks and rejects your home directory, its ancestors, and paths that overlap either agent configuration directory or the sandbox cache. This prevents writable workspace access to read-only configuration and trusted policy snapshots. Paths containing colons or newlines cannot be passed through smolvm's volume syntax and are rejected.
 
-The workload retains only filesystem capabilities needed to edit host-owned workspace files. Network-administration, raw-socket, namespace-administration, and privilege-escalation capabilities are removed before the shell or agent starts. Privileged nested-sandbox mode is no longer available because it would let the workload bypass the network policy; extensions that require privileged namespace creation are not supported.
+Workloads run with your host UID/GID, no effective, permitted, inheritable, ambient, or bounding capabilities, and `no_new_privs`. Joined shells use the root-owned entrypoint to restore the seeded HOME/TMPDIR and drop identity and capabilities before running a command. Root-owned image binaries remain outside the workload's write authority. Install dependencies in the project or private HOME; guest-root package installation and privileged nested-sandbox mode are not supported.
 
 ### Installing Globally
 
@@ -86,11 +88,7 @@ To join a running VM without the create path, or to reach it by name:
 ./sandbox-vm.py attach -- vm -c 'hostname'     # run a command instead of a shell
 ```
 
-The shell starts in the VM's workload namespace, where the project mount, the
-egress policy, and the seeded configuration are in force. The first terminal's
-console session keeps running; a second `sandbox.sh` for the same directory
-would instead start a second VM, because `machine run` connects its console to
-the VM's single serial port.
+The shell starts as the same non-root user in the VM's workload namespace, with the same project, seeded configuration, and pinned network policy. The first terminal's console keeps running; another `sandbox.sh` for the same workspace joins it through the same restricted entry path. Named attachment also requires a live launcher and the image registered by the current launcher. Image registration is private host state under `~/.cache/sandbox/.policy-image`; older or unrelated images are rejected before any guest discovery command runs.
 
 Sessions and history survive every case. They live in host directories mounted
 into each VM, so a new VM sees the work of the previous one.
@@ -162,7 +160,7 @@ SQLite history indexes, terminal breadcrumbs, and runtime leases remain private 
 ### Snapshot Rules
 
 - Copied directories are private (`0700`). Ordinary copied files are `0600`; files with the owner's executable bit keep that bit as `0700`. These rules do not change the shared state mounts.
-- Symlinks, sockets, devices, and FIFOs are not copied or followed. Symlinked extensions must be installed as ordinary files inside the VM if needed.
+- File symlinks into the mirrored native `.pi` or `.omp` configuration trees become regular private files. This preserves shared definitions such as `~/.omp/agent/models.yml` linked to `~/.pi/agent/models.json`, without a writable link back to host configuration. Excluded history, trust, and runtime files remain excluded through links. Directory links, links outside these roots, broken links, sockets, devices, and FIFOs are omitted. Configuration is copied only at boot; start a fresh VM to pick up host changes.
 - Directories named `sessions`, `terminal-sessions`, `cache`, `caches`, `logs`, `bin`, `__pycache__`, or `.git` are omitted at any depth. Host binaries and cached native dependencies may not run on Linux; install required Linux dependencies in the VM.
 - At each configuration root (including named profile roots), `run`, `ssh-control`, `puppeteer`, `natives`, and `.supervisor` are omitted. These contain host daemon state, browser profiles, sockets, or platform-specific binaries. A portable extension directory such as `agent/extensions/run` is still copied.
 - `history.db*`, `trust.db*`, `trust.json`, `.seeded`, and SQLite journal sidecars are omitted. Host trust decisions are not imported from those files.
@@ -207,25 +205,47 @@ Note this requires the host's Tailscale connection and DNS service to be availab
 
 ## Network Policy
 
-`sandbox-network.json` selects `spark1.taild8834b.ts.net` on TCP port `443`. At each VM boot, trusted init resolves it, verifies that all returned addresses are Tailscale addresses, and atomically installs an nftables policy before agent configuration is seeded or any workload starts. Startup fails if resolution or policy installation fails. Addresses are pinned for that VM's lifetime; restart it after a peer address changes.
+`sandbox-network.json` is the active host/guest policy, separate from the Pi extension's `sandbox.json.autonomous`. It selects Spark's Tailscale hostname and HTTPS port, explicit blocked domain suffixes, blocked ASNs, and the maximum cached snapshot age. The image contains a copy at `/opt/sandbox/network.json`; rebuild after changing the policy so host and guest policy hashes agree.
 
 | Destination | Workload access |
 |---|---|
-| Public Internet | Allowed |
-| Spark1's pinned Tailscale addresses | TCP 443 only |
+| Public Internet outside the denylists | Allowed |
+| Spark's pinned Tailscale addresses | Configured HTTPS port only |
 | Other tailnet, LAN, link-local, or reserved addresses | Blocked |
-| Configured DNS resolver addresses | TCP/UDP 53 only |
+| TCP/UDP DNS on port 53 | Redirected to the guest's filtered resolver |
+| Threat domains and configured Alibaba suffixes | DNS NXDOMAIN, including subdomains and all query types |
+| Spamhaus DROP and configured ASN prefixes | Blocked for IPv4 and IPv6 |
 | VM loopback | Allowed for VM-local services |
 
-The rule constrains destination IPs and TCP ports, not HTTP paths or the contents of HTTPS requests. Public Internet access still permits external proxies and data upload.
+The baseline uses [HaGeZi TIF Medium](https://github.com/hagezi/dns-blocklists#tifmedium) for threat domains, [Spamhaus DROP](https://www.spamhaus.org/blocklists/do-not-route-or-peer/) for malicious networks, and [ipverse](https://github.com/ipverse/as-ip-blocks) for AS37963 and AS45102 prefixes. Medium limits resolver memory use in the 2 GiB VM. Explicit suffixes include Alibaba Cloud/OSS, Alibaba, Aliyun, AliCDN, and npmmirror domains. These provider restrictions are policy choices, not assertions that every hosted service is malicious. They can block legitimate dependencies and do not constitute an exhaustive inventory of Alibaba infrastructure.
 
-`sandbox.smolfile` runs trusted network init with VM-grade privileges. The launcher forces `virtio-net` so packets pass through the guest kernel and uses `--no-init-cache` so every VM gets fresh rules and resolver addresses. The seeder then uses `setpriv` to retain only `CAP_DAC_OVERRIDE` and `CAP_FOWNER`, with no ambient/inheritable capabilities and `no_new_privs`. The workload cannot modify nftables, create raw packet sockets, or regrant network privileges. These rules are inside the VM; no host firewall or tailnet ACL is changed.
+Before a fresh VM starts, `network-feeds.py` downloads and validates feeds on the host. It keeps immutable, content-addressed snapshots under `~/.cache/sandbox/network`; only the selected snapshot is mounted into the VM, read-only. Each manifest records source URLs, source hashes, policy identity, creation time, and data-file hashes. Downloads are not executable configuration. A refresh is attempted after 24 hours. Failed refreshes may use a verified matching snapshot up to `feedMaxAgeHours` old (168 hours by default); missing, corrupt, expired, or policy-mismatched data cannot authorize a new VM.
+
+To request a refresh before the next fresh boot:
+
+```bash
+./network-feeds.py --cache-dir "$HOME/.cache/sandbox/network" \
+  --config ./sandbox-network.json --refresh
+```
+
+Feed downloads always verify TLS certificates and hostnames. On macOS, the updater uses `/etc/ssl/cert.pem` when available, so it does not depend on a framework Python installation having its own certificate bundle. Explicit `SSL_CERT_FILE` or `SSL_CERT_DIR` settings take precedence; use them for a trusted custom or enterprise CA store. Certificate failures do not disable verification or authorize an unfiltered VM.
+
+Snapshots are not bundled into published images. HaGeZi data is GPL-3.0, ipverse data is CC0, and Spamhaus data has its own terms and attribution requirements. Source license identifiers are recorded in the manifest; review upstream terms before redistributing feed data.
+
+If firewall installation fails, the startup error names the nftables stage and includes up to three error headers. It omits echoed rules and configuration data. A failed installation still blocks workload startup; the diagnostic does not enable a permissive fallback.
+The DNS redirect uses numeric output-hook priority `-100`, before the egress filter at priority `0`. This avoids nftables versions that reject the symbolic `dstnat` priority on the output hook.
+
+`sandbox.smolfile` runs trusted `vm-network.py` startup inside the guest. It verifies snapshot integrity, freshness, and policy identity, resolves Spark to Tailscale addresses, starts dnsmasq as dedicated UID 65532 with no capabilities, and installs nftables rules. Startup fails closed if any step fails. Only the resolver may contact the configured upstream DNS servers on port 53; workload DNS is redirected even when a tool specifies another resolver. The launcher uses `virtio-net` so guest packets cross these rules, and disables init caching. Narrow ICMPv6 discovery allowances permit ordinary IPv6 neighbor discovery.
+
+Rules, domain data, and resolved Spark addresses are pinned for a VM's lifetime. Joining does not refresh them; exit and start a fresh VM to apply updates. Enforcement is in the guest kernel and resolver, not in the hypervisor, host firewall, or tailnet ACL.
+
+This is a denylist baseline, not exfiltration prevention. Unknown destinations, allowed upload services, and external proxies remain reachable. DNS-over-HTTPS/TLS or direct IP use can bypass domain-only rules where the destination IP is not independently blocked. TLS payloads and HTTP paths are not inspected. Stronger exfiltration control requires default-deny egress and narrowly approved destinations.
 
 ## Security Boundaries
 
 - The microVM is the host isolation boundary. The project and the session/blob directories listed above are mounted writable, except the git hook locations inside the project (`.git/hooks`, `.git/modules`, and each linked worktree's `.git/worktrees/<name>/hooks`), which mount read-only. Git executes hooks and hook-class helpers without a prompt, so a guest-written hook would run on the host at the next host git command. `git commit`, `git add`, and `git diff` still work: they write objects, refs, and the index, which stay writable.
 - Three git execution paths stay open through files virtiofs cannot mount read-only (virtiofs mounts directories only). Guest work can edit `.git/config` to set `core.hooksPath`, `core.fsmonitor`, or `--separate-git-dir` to a path in the workspace that is not itself re-mounted; it can also redirect a worktree's `.git` file pointer. Closing them needs an independent clone per VM. The practical guidance: do not run git on the host in a workspace an untrusted session wrote to, and review `git -C <dir> config --list` and `find <dir> -name '*.git*' -maxdepth 2` first.
-- Trusted init configures the network before the workload runs. The workload remains root inside the guest with filesystem-only capabilities; read-only host mounts are also enforced by the backing filesystem. Private file modes do not hide credentials from the agent itself.
+- Trusted root code configures the network and private HOME before changing to the host user's non-root UID/GID. Normal workloads cannot modify the root-owned entrypoint, firewall, resolver configuration, or image tools. Read-only host mounts are also enforced by the backing filesystem. Private configuration remains readable by the agent itself.
 - SSH forwarding is **off by default**. `--ssh-agent` requires an existing `SSH_AUTH_SOCK` Unix socket. Forwarding does not copy private keys, but it allows VM processes to request signatures and authenticate as you. Prefer a dedicated agent with only the keys needed for this project.
 - Credentials in shared configuration are readable inside the VM. An agent, extension, or compromised dependency can disclose them over the network. Read-only configuration mounts prevent changes to those files; they do not prevent credential theft or use.
 - The workspace is writable host state, including its `.git` directory and any secrets already in the workspace. Review changes before running host-side scripts or hooks.
@@ -235,11 +255,11 @@ The rule constrains destination IPs and TCP ports, not HTTP paths or the content
 
 ## Image Builds and Publishing
 
-`Dockerfile` includes Node.js 24, pinned Pi and omp releases, Python, uv, DuckDB, git, ripgrep, build tools, zsh, nftables, and util-linux. System Python supplies SQLite snapshots; `nft` installs the kernel policy and `setpriv` confines workload capabilities. No host Python dependency is required.
+`Dockerfile` includes Node.js 24, pinned Pi and omp releases, Python, uv, DuckDB, git, ripgrep, build tools, zsh, nftables, dnsmasq, and util-linux. System Python supplies SQLite snapshots; `nft` installs the kernel policy, dnsmasq filters DNS, and `setpriv` restricts workload identities and privileges. Host Python handles feed snapshots and VM management.
 
 The launcher first exports with `docker save`. If that archive is incompatible with smolvm, it uses buildx's **Docker** exporter, not an OCI archive. Export failures stop launch; replacement of the cached archive happens only after a successful export and compatibility check. Existing buildx builders are not selected, created, or deleted by the launcher. Registry-backed export fallback uses an immutable digest. A local-only image needs a selected Docker-driver builder if `docker save` cannot export it.
 
-`.github/workflows/build-image.yml` builds amd64 and arm64 images and publishes `latest` plus the commit SHA when the image sources or workflow change. Image sources include both Python entrypoints and `sandbox-network.json`. It requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets. The host-side Smolfile must remain beside the launcher.
+`.github/workflows/build-image.yml` builds amd64 and arm64 images and publishes `latest` plus the commit SHA when the image sources or workflow change. Image sources include both Python entrypoints, shared `network_policy.py`, and `sandbox-network.json`. It requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets. The host-side Smolfile must remain beside the launcher. Feed updates do not require publishing a new image.
 
 Local and CI publishing use BuildKit's registry exporter with `compression=zstd`, `compression-level=22`, `force-compression=true`, and `oci-mediatypes=true`. Level 22 favors smaller registry layers over export CPU time; `force-compression` also recompresses inherited layers. These settings affect published OCI layers, not necessarily the size of the local Docker-format archive used by smolvm.
 
@@ -257,11 +277,17 @@ PLATFORMS=linux/amd64 ./build.sh  # Builds and pushes one platform
 ./verify-guest.sh
 ```
 
-This builds the working tree without publishing and boots disposable microVMs using only synthetic configuration. Kernel network fixtures prove allowed destination/port paths and count rejected IPv4 and IPv6 tailnet packets. Workload checks prove nftables and raw-packet bypass are denied while host-owned workspace files remain editable. The suite also checks separate agent roots, private permissions, omitted runtime trees and symlinks, read-only host sources, committed SQLite WAL snapshots, consistent backups during concurrent writes, preserved VM edits across nested shells, and both agents' versions.
+This builds the working tree without publishing and boots disposable microVMs using synthetic configuration and denylist snapshots, without downloading live feeds. Kernel fixtures check permitted IPv4/IPv6 paths, IPv6 neighbor discovery, denied tailnet and feed destinations, DNS suffix blocking for multiple query types, and redirection of alternate port-53 resolvers. Initial and independently attached workloads must be non-root, have empty capability sets including the bounding set, and retain `no_new_privs`. The suite checks writable host-owned files, protected image entry code, separate private agent roots, cross-agent model-file links, unchanged shared state modes, read-only configuration sources, SQLite WAL snapshots and concurrent writes, nested shells, and pinned agent versions.
 
 Real Pi session APIs and the real omp CLI create, discover, and continue native transcripts across separate VMs. omp default and named profiles replay prior turns and image blobs through a local synthetic model provider. The host observes transcripts, artifacts, and blobs before the first VM exits. A cold-config consumer stage uses the pinned Linux agents at native host paths, without seeding or a shared SQLite index; it does not require host-installed agents. The suite never mounts your real `~/.pi` or `~/.omp`. Failed runs retain their synthetic fixture directory for diagnosis.
 
 Guest checks and fixture programs live in `verification/`. The runner copies them into its temporary control directory and mounts that directory read-only at `/verify`.
+
+Host-side feed integrity tests use the Python standard library. The TLS regression tests also use `openssl` to generate temporary local test certificates and are skipped if that command is unavailable:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s verification -p 'test_network_policy.py'
+```
 
 To use an existing Docker-format image archive:
 
@@ -276,8 +302,10 @@ SANDBOX_VERIFY_IMAGE_TAR=/path/to/image.tar ./verify-guest.sh
 - `lib/image.sh`: image acquisition, layout checks, archive export, and cache cleanup.
 - `sandbox-vm.py`: reuse or attach to a project's VM, reclaim abandoned VMs.
 - `vm-seed.py`: private, per-agent configuration snapshots.
-- `vm-network.py`: pinned tailnet HTTPS exception and kernel egress policy.
-- `sandbox-network.json`: permitted tailnet hostname and TCP port.
+- `vm-network.py`: trusted DNS and nftables initialization.
+- `network-feeds.py`: host-side feed refresh and immutable snapshot selection.
+- `network_policy.py`: shared policy, domain, CIDR, and snapshot validation.
+- `sandbox-network.json`: Spark exception, provider restrictions, and snapshot-age policy.
 - `sandbox.smolfile`: trusted per-VM network initialization.
 - `sandbox.json.autonomous`: Pi sandbox extension policy.
 - `verify-guest.sh`: host-side orchestration for real-guest security smoke checks.

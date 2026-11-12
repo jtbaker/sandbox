@@ -2,8 +2,11 @@
 """Seed private configuration around required, native shared session mounts."""
 
 import fcntl
+import grp
 import json
 import os
+import pwd
+import re
 import shutil
 import sqlite3
 import stat
@@ -31,6 +34,65 @@ RUNTIME_DIRS = {"run", "ssh-control", "puppeteer", "natives", ".supervisor"}
 PROFILE = Path("/opt/sandbox/sandbox.json.autonomous")
 MARKER = Path("/run/sandbox.seeded")
 NETWORK_MARKER = Path("/run/sandbox-network.json")
+MAX_ID = 2**32 - 2
+IMAGE_ROOTS = tuple(
+    Path(path)
+    for path in (
+        "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/opt",
+        "/proc", "/root", "/run", "/sbin", "/sys", "/usr",
+    )
+)
+
+
+def workload_identity():
+    values = []
+    for name in ("SANDBOX_UID", "SANDBOX_GID"):
+        value = os.environ.get(name, "")
+        if not re.fullmatch(r"[0-9]{1,10}", value) or int(value) > MAX_ID:
+            raise RuntimeError(f"{name} must be a bounded numeric identity")
+        values.append(int(value))
+    uid, gid = values
+    if uid in (0, 65532):
+        raise RuntimeError("SANDBOX_UID must be non-root and must not be 65532")
+    return uid, gid
+
+
+def prepare_identity(uid, gid, home):
+    try:
+        grp.getgrgid(gid)
+    except KeyError:
+        name = f"sandbox-{gid}"
+        try:
+            grp.getgrnam(name)
+        except KeyError:
+            with open("/etc/group", "a") as groups:
+                groups.write(f"{name}:!:{gid}:\n")
+        else:
+            raise RuntimeError(f"guest group name is already assigned: {name}")
+    try:
+        pwd.getpwuid(uid)
+    except KeyError:
+        name = f"sandbox-{uid}"
+        try:
+            pwd.getpwnam(name)
+        except KeyError:
+            with open("/etc/passwd", "a") as users:
+                users.write(f"{name}:!:{uid}:{gid}::{home}:/usr/sbin/nologin\n")
+        else:
+            raise RuntimeError(f"guest user name is already assigned: {name}")
+
+
+def own_private_tree(path, uid, gid, mounts):
+    # Never stat, traverse, chmod, or chown a mounted state tree or host source.
+    if path in mounts or any(source == path for source, _ in HOST_ROOTS):
+        return
+    mode = path.lstat().st_mode
+    if stat.S_ISLNK(mode):
+        return  # In particular, leave image tool and shell targets root-owned.
+    if stat.S_ISDIR(mode):
+        for entry in path.iterdir():
+            own_private_tree(entry, uid, gid, mounts)
+    os.chown(path, uid, gid, follow_symlinks=False)
 
 
 def backup_database(source, destination):
@@ -54,27 +116,74 @@ def backup_database(source, destination):
         raise RuntimeError(f"SQLite snapshot failed for {source}: {error}") from error
 
 
-def copy_tree(source, destination, relative=Path(), shared=frozenset()):
-    destination.mkdir(mode=0o700)
-    config_root = not relative.parts or (
-        len(relative.parts) == 2 and relative.parts[0] == "profiles"
+def skip_directory(relative):
+    parent = relative.parent
+    config_root = not parent.parts or (
+        len(parent.parts) == 2 and parent.parts[0] == "profiles"
     )
+    return (
+        relative.name in SKIP_DIRS
+        or (config_root and relative.name in RUNTIME_DIRS)
+    )
+
+
+def configuration_link(entry, roots):
+    target = Path(os.readlink(entry))
+    if not target.is_absolute():
+        for source, native, _ in roots:
+            if entry.is_relative_to(source):
+                target = native / entry.relative_to(source).parent / target
+                break
+    target = Path(os.path.normpath(target))
+    for source, native, _ in roots:
+        if target.is_relative_to(native):
+            target = source / target.relative_to(native)
+            break
+    else:
+        return None
+    try:
+        target = target.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    for source, _, shared in roots:
+        if target.is_relative_to(source):
+            relative = target.relative_to(source)
+            if any(
+                parent in shared or skip_directory(parent)
+                for parent in relative.parents
+                if parent.parts
+            ):
+                return None
+            return target if target.is_file() else None
+    return None
+
+
+def copy_tree(source, destination, relative=Path(), shared=frozenset(), roots=()):
+    destination.mkdir(mode=0o700)
+    roots = roots or ((source, source, shared),)
     for entry in source.iterdir():
         mode = entry.lstat().st_mode
         target = destination / entry.name
-        # Do not follow host symlinks or import sockets/devices/FIFOs.
+        # File links become private files only within the mounted config roots.
+        if stat.S_ISLNK(mode):
+            entry = configuration_link(entry, roots)
+            if entry is None:
+                continue
+            mode = entry.lstat().st_mode
         if stat.S_ISDIR(mode):
             if (
                 relative / entry.name not in shared
-                and entry.name not in SKIP_DIRS
-                and not (config_root and entry.name in RUNTIME_DIRS)
+                and not skip_directory(relative / entry.name)
             ):
-                copy_tree(entry, target, relative / entry.name, shared)
+                copy_tree(entry, target, relative / entry.name, shared, roots)
         elif stat.S_ISREG(mode):
             if (
-                entry.name.startswith(("history.db", "trust.db"))
-                or entry.name in {"trust.json", ".seeded"}
-                or entry.name.endswith((".db-wal", ".db-shm", ".db-journal"))
+                any(
+                    name.startswith(("history.db", "trust.db"))
+                    or name in {"trust.json", ".seeded"}
+                    or name.endswith((".db-wal", ".db-shm", ".db-journal"))
+                    for name in (entry.name, target.name)
+                )
             ):
                 continue
             if entry.suffix == ".db":
@@ -107,7 +216,9 @@ def ensure_directory(path):
             if not directory.is_dir():
                 raise RuntimeError(f"not a directory: {directory}")
         else:
-            directory.mkdir(mode=0o700)
+            directory.mkdir(mode=0o700 if directory == path else 0o755)
+            if directory != path:
+                os.chmod(directory, 0o755)  # Ancestors must survive the private umask.
 
 
 def source_profiles(source):
@@ -262,7 +373,7 @@ def prepare_private_home(home):
         )
     subprocess.run(
         [
-            "git",
+            "/usr/bin/git",
             "config",
             "--file",
             str(gitconfig),
@@ -286,6 +397,9 @@ def prepare_workspace_alias():
 
 
 def seed():
+    if os.geteuid() != 0:
+        raise RuntimeError("configuration seeding requires the root entrypoint")
+    uid, gid = workload_identity()
     if not NETWORK_MARKER.is_file():
         raise RuntimeError(
             "network policy was not initialized; launch through sandbox.sh"
@@ -296,18 +410,43 @@ def seed():
         )
     home = absolute_path(os.environ.get("HOME", ""), "HOME")
     temporary = absolute_path(os.environ.get("TMPDIR", ""), "TMPDIR")
+    # These paths contain image-owned system files, not a native private HOME.
+    for system in IMAGE_ROOTS:
+        if home == system or system in home.parents or home in system.parents:
+            raise RuntimeError(f"HOME must not overlap image system paths: {home}")
+    if home in (Path("/home"), Path("/Users"), Path("/private"), Path("/var")):
+        raise RuntimeError(f"HOME must not replace an image system directory: {home}")
+    if ":" in str(home) or any(character in str(home) for character in "\r\n"):
+        raise RuntimeError("HOME cannot be represented in the guest account database")
     os.umask(0o077)
     with open("/run/sandbox-seed.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         mounts = mount_paths()
         if home in mounts or home.is_mount():
             raise RuntimeError(f"HOME must be VM-private, not a mount: {home}")
+        if any(mount in home.parents for mount in mounts if mount != Path("/")):
+            raise RuntimeError(f"HOME must not be inside a mount: {home}")
+        if temporary not in (Path("/tmp"), Path("/var/tmp")):
+            if temporary in mounts or any(
+                mount in temporary.parents for mount in mounts if mount != Path("/")
+            ):
+                raise RuntimeError(f"TMPDIR must be VM-private: {temporary}")
+            if (
+                temporary in (Path("/"), Path("/home"), Path("/Users"), Path("/private"), Path("/var"))
+                or any(system == temporary or system in temporary.parents for system in IMAGE_ROOTS)
+            ):
+                raise RuntimeError(f"TMPDIR must not overlap image system paths: {temporary}")
         ensure_directory(home)
         ensure_directory(temporary)
         layouts = state_layout(home)
         validate_mounts(layouts, mounts)
+        prepare_identity(uid, gid, home)
         if MARKER.exists():
-            return
+            with MARKER.open() as marker:
+                identity = json.load(marker)
+            if identity != {"uid": uid, "gid": gid, "home": str(home), "tmpdir": str(temporary)}:
+                raise RuntimeError("seeded workload identity does not match this entrypoint")
+            return uid, gid
         structural = {}
         for _, destination, shared in layouts:
             structural[destination] = validate_native_root(destination, shared, mounts)
@@ -322,7 +461,7 @@ def seed():
             for source, destination, shared in layouts:
                 snapshot = Path(tmp) / destination.name
                 if source.exists():
-                    copy_tree(source, snapshot, shared=shared)
+                    copy_tree(source, snapshot, shared=shared, roots=layouts)
                 else:
                     snapshot.mkdir(mode=0o700)
                 agent = snapshot / "agent"
@@ -338,28 +477,69 @@ def seed():
             prepare_workspace_alias()
             for snapshot, destination in staged:
                 merge_snapshot(snapshot, destination, structural[destination])
-        MARKER.touch(mode=0o600)
+        for _, destination, _ in layouts:
+            own_private_tree(destination, uid, gid, mounts)
+        for name in (".local", ".gitconfig", ".zshrc"):
+            own_private_tree(home / name, uid, gid, mounts)
+        os.chown(home, uid, gid, follow_symlinks=False)
+        # /tmp is an image-owned shared temporary directory. Native per-user
+        # temporary roots are private, but their mounted descendants stay alone.
+        if temporary not in (Path("/tmp"), Path("/var/tmp")):
+            os.chown(temporary, uid, gid, follow_symlinks=False)
+        with MARKER.open("x") as marker:
+            json.dump(
+                {"uid": uid, "gid": gid, "home": str(home), "tmpdir": str(temporary)},
+                marker,
+            )
+    return uid, gid
+
+
+def joined_identity(uid, gid):
+    if os.geteuid() != 0:
+        raise RuntimeError("joining requires the root entrypoint")
+    with MARKER.open() as marker:
+        identity = json.load(marker)
+    if (identity["uid"], identity["gid"]) != (uid, gid):
+        raise RuntimeError("joined workload identity does not match seeded configuration")
+    os.environ.update(
+        HOME=identity["home"],
+        TMPDIR=identity["tmpdir"],
+        SANDBOX_UID=str(uid),
+        SANDBOX_GID=str(gid),
+        SANDBOX_PERSIST_SESSIONS="1",
+    )
+    return uid, gid
 
 
 if __name__ == "__main__":
     try:
-        seed()
+        if sys.argv[1:2] == ["--join"]:
+            if len(sys.argv) < 6 or sys.argv[4] != "--":
+                raise RuntimeError("join requires UID GID -- COMMAND")
+            uid, gid = joined_identity(int(sys.argv[2]), int(sys.argv[3]))
+            command = sys.argv[5:]
+        else:
+            uid, gid = seed()
+            command = sys.argv[1:] or ["zsh", "-l"]
     except Exception as error:
         # Our RuntimeError messages describe paths/operations, never file data.
         detail = str(error) if isinstance(error, RuntimeError) else type(error).__name__
         print(f"sandbox: configuration seeding failed: {detail}", file=sys.stderr)
         sys.exit(1)
-    command = sys.argv[1:] or ["zsh", "-l"]
-    # Keep only filesystem permissions needed to edit host-owned workspace
-    # files. Network, raw-socket, namespace, and privilege-escalation capabilities
-    # must not reach agents, extensions, or shell commands.
+    # Change numeric identity and remove every capability before any shell,
+    # startup file, command, or PATH lookup can run.
     os.execv(
         "/usr/bin/setpriv",
         [
             "setpriv",
-            "--bounding-set=-all,+dac_override,+fowner",
+            "--bounding-set=-all",
             "--inh-caps=-all",
             "--ambient-caps=-all",
+            "--clear-groups",
+            "--reuid",
+            str(uid),
+            "--regid",
+            str(gid),
             "--no-new-privs",
             "--",
             *command,

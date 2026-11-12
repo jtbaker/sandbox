@@ -36,19 +36,19 @@ prepare_image_archive() (
     # Reject images built for the old shared-directory/shell-seeder layout before
     # exporting or booting them. A fresh registry pull alone cannot update that code.
     layout_key="io.sandbox.config-layout"
-    layout_version="separate-v4"
+    layout_version="separate-v5"
     if ! image_layout=$(docker image inspect --format "{{index .Config.Labels \"$layout_key\"}}" "$image_name"); then
         echo "Error: image is unavailable locally; SANDBOX_IMAGE requires an existing local image." >&2
         exit 1
     fi
     if [[ "$image_layout" != "$layout_version" ]]; then
         if [[ "$pull_image" == false ]]; then
-            echo "Error: SANDBOX_IMAGE lacks the current configuration seeder; rebuild it from Dockerfile." >&2
+            echo "Error: SANDBOX_IMAGE lacks the current non-root network policy; rebuild it from Dockerfile." >&2
             exit 1
         fi
         if [[ ! -f "$repo_dir/Dockerfile" || ! -f "$repo_dir/vm-seed.py" ||
-              ! -f "$repo_dir/vm-network.py" || ! -f "$repo_dir/sandbox-network.json" ||
-              ! -f "$repo_dir/sandbox.json.autonomous" ]]; then
+              ! -f "$repo_dir/vm-network.py" || ! -f "$repo_dir/network_policy.py" ||
+              ! -f "$repo_dir/sandbox-network.json" || ! -f "$repo_dir/sandbox.json.autonomous" ]]; then
             echo "Error: published image is too old; matching image sources must be beside the launcher." >&2
             exit 1
         fi

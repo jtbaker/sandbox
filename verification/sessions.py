@@ -23,6 +23,26 @@ PROOF = CWD / "session-proof.json"
 MARKER = "mounted state is not a private config copy\n"
 
 
+def prepare_host_consumer():
+    uid, gid = int(os.environ["SANDBOX_UID"]), int(os.environ["SANDBOX_GID"])
+    assert uid > 0
+    directories = {HOME, Path(os.environ["TMPDIR"])}
+    for root in ROOTS:
+        path = root
+        while path != HOME:
+            directories.add(path)
+            path = path.parent
+    for path in sorted(directories, key=lambda path: len(path.parts)):
+        assert not mounted(path), "host-consumer private directory is mounted"
+        path.mkdir(parents=True, exist_ok=True)
+        os.chown(path, uid, gid)
+    os.execv("/usr/bin/setpriv", [
+        "setpriv", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all",
+        "--clear-groups", "--reuid", str(uid), "--regid", str(gid), "--no-new-privs",
+        "--", "/usr/bin/python3", __file__, "host",
+    ])
+
+
 def login_shell(script):
     import fcntl
     import pty
@@ -263,7 +283,9 @@ def sessions(mode):
 
 try:
     operation = sys.argv[1]
-    if operation == "structure":
+    if operation == "host-prepare":
+        prepare_host_consumer()
+    elif operation == "structure":
         structure()
     elif operation == "policy":
         policy()
