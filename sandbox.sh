@@ -456,6 +456,28 @@ else
 fi
 
 echo "Mounting host directory: $TARGET_DIR"
+# Join before mount: a second terminal for this workspace gets a shell in the
+# running VM, not a second VM. The join path must precede the read-only hook
+# mounts because machine exec runs inside the already-mounted VM; its mounts
+# came from the first launcher's flags. join-spec prints `join <vm>` only for
+# an attached VM (live launcher); leaked and absent cases boot fresh, which
+# keeps the pinned network policy current. The agent flag is a boot-time hint
+# only: inside the existing VM, run either agent by hand.
+JOIN_DECISION=$("$REPO_DIR/sandbox-vm.py" join-spec "$TARGET_DIR" 2>/dev/null || echo none)
+if [[ "$JOIN_DECISION" == join\ * ]]; then
+    JOIN_VM="${JOIN_DECISION#join }"
+    if [[ "$AGENT" != pi ]]; then
+        echo "Joining $JOIN_VM: it booted with pi; run $AGENT by hand when needed."
+    else
+        echo "Joining $JOIN_VM for this workspace; a login shell starts beside any console."
+    fi
+    # -i -t gives the joined shell its own pty (job control, zle). zsh needs
+    # -i too: `zsh -l` with a tty still reports non-interactive, and
+    # oh-my-zsh sets the theme (the 🔒 prefix rides on it) only under
+    # `[[ -o interactive ]]`. Login ordering stays intact: profile scripts
+    # run before zshrc.
+    exec smolvm machine exec -i -t -w "$TARGET_DIR" --name "$JOIN_VM" /bin/zsh -i -l
+fi
 # Git runs hooks and hook-class helpers (fsmonitor, filters) without a
 # prompt. A writable project mount lets guest work, or an untrusted clone's
 # own git directory, plant a script that host git then executes as the host
@@ -486,8 +508,8 @@ if [[ ${#PROTECTED_PATHS[@]} -gt 0 ]]; then
 else
     echo "Note: no git metadata found in the workspace mount."
 fi
-echo "Starting an interactive shell; run $AGENT when ready. Sessions persist in normal host history."
-echo "Do not edit the same session from multiple host/VM processes at once."
+echo "Starting an interactive shell. Sessions persist in normal host history."
+echo "No agent starts on its own: run $AGENT (or the other) when ready."
 smolvm "${SMOLVM_ARGS[@]}" \
     "${MOUNT_ARGS[@]}" \
     "${STATE_MOUNTS[@]}" \
