@@ -43,7 +43,9 @@ Without `SANDBOX_IMAGE`, the launcher pulls `jasonbaker/sandbox:latest`. A local
 
 The launcher passes `--dns 100.100.100.100` to smolvm, the Tailscale resolver address, unless you pass `--dns` yourself. See [Tailnet DNS](#tailnet-dns) for why that address is the right default.
 
-`--agent` and `AGENT` select the startup hint, not an automatically launched process. Both agents remain available in the same shell. `--agent` overrides `AGENT`; accepted values are `pi` and `omp`.
+`--agent` and `AGENT` select the startup hint, not an automatically launched process. No agent starts on its own; run `pi` or `omp` in the shell when ready, including from a plain `./sandbox.sh` with no flag. Both agents remain available in the same shell. `--agent` overrides `AGENT`; accepted values are `pi` and `omp`.
+
+When a VM for that workspace is already running with a live launcher, `sandbox.sh` joins it instead of starting a second VM: a login shell opens inside the existing VM beside its console session, with the same mounts and policy. If the existing VM was started with a different `--agent`, the notice says so; run either agent inside it by hand. A VM whose launcher died, or none running, starts fresh, which keeps the pinned network policy current.
 
 The workspace must be an existing directory. The launcher resolves symlinks and rejects your home directory, its ancestors, and paths that overlap either agent configuration directory. This prevents the writable workspace from exposing the same configuration that is mounted read-only. Paths containing colons or newlines are rejected because they cannot be passed safely through smolvm's volume syntax.
 
@@ -60,8 +62,7 @@ sandbox /path/to/project
 
 ## Reusing and Reclaiming VMs
 
-`sandbox-vm.py` reuses a VM that is already serving a project, and reclaims
-VMs that an interrupted run left behind.
+`sandbox.sh` joins a running VM for its workspace; `sandbox-vm.py` reuses VMs that are already serving a project and reclaims VMs that an interrupted run left behind.
 
 Start a sandbox for a directory and it picks up whatever exists there:
 
@@ -69,7 +70,7 @@ Start a sandbox for a directory and it picks up whatever exists there:
 ./sandbox-vm.py reuse --target ~/src/api
 ```
 
-There are two outcomes.
+The outcomes match `sandbox` for the same directory.
 
 - A VM for that directory is running with a live launcher: the command execs a
   login shell inside that VM. The terminal joins the existing VM beside its

@@ -387,6 +387,30 @@ def do_attach(args):
     return 0
 
 
+def join_spec(target):
+    """Print the join decision for a workspace, for sandbox.sh.
+
+    One line: `none` (no running VM, or one with a dead launcher: boot fresh),
+    or `join <vm-name>` (an attached VM serves the workspace). A launcher that
+    exits with the VM still running is exactly the leaked case and boots fresh.
+    """
+    workspace = str(Path(target).resolve())
+    if not Path(workspace).is_dir():
+        print("none")
+        return 0
+    owned, booting = launcher_children()
+    running = running_for(workspace, owned, booting)
+    if running is None:
+        print("none")
+        return 0
+    status, _ = attach_state(running, owned, booting)
+    if status == "attached":
+        print(f"join {running['name']}")
+    else:
+        print("none")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -436,6 +460,12 @@ def build_parser():
         help="run this command in the VM instead of a login shell",
     )
     attach.set_defaults(func=do_attach)
+
+    join = subparsers.add_parser(
+        "join-spec", help="print the join decision for a workspace (for launchers)"
+    )
+    join.add_argument("target")
+    join.set_defaults(func=lambda args: join_spec(args.target))
 
     return parser
 
